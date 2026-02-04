@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -12,6 +12,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ProductModal } from "@/components/ProductModal";
 import type { Product } from "@/types/Product";
+import { db } from "@/firebaseConfig";
+import { collection, getDocs } from "firebase/firestore";
 
 const BRAND = "#942229";
 
@@ -19,6 +21,9 @@ export default function HomeScreen() {
   const [query, setQuery] = useState("");
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const categories = useMemo(
     () => [
@@ -30,18 +35,32 @@ export default function HomeScreen() {
     []
   );
 
-  const featured = useMemo(
-    () => [
-      { id: "000", name: "Álcool Gel 80° Acendedor Zulu 500 g", price: 19.39 },
-      { id: "001", name: "Amstel Lata 350 ml", price: 4.39 },
-      { id: "002", name: "Bacon Fatiado Seara 250 g", price: 23.89 },
-      { id: "003", name: "Bife Ancho Angus aprox. 600 g", price: 79.99 },
-      { id: "004", name: "Bife Chorizo Angus aprox. 600 g", price: 131.9 },
-    ],
-    []
-  );
+  useEffect(() => {
+    async function fetchProducts() {
+      setLoading(true);
+      setError(null);
+      try {
+        const querySnapshot = await getDocs(collection(db, "produtos"));
+        const list: Product[] = [];
+        querySnapshot.forEach((doc) => {
+          const data = doc.data();
+          list.push({
+            id: doc.id,
+            name: data.name,
+            price: data.price,
+          });
+        });
+        setProducts(list);
+      } catch (e: any) {
+        setError("Erro ao buscar produtos. Tente novamente.");
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchProducts();
+  }, []);
 
-  const filtered = featured.filter((p) =>
+  const filtered = products.filter((p) =>
     p.name.toLowerCase().includes(query.trim().toLowerCase())
   );
 
@@ -102,30 +121,36 @@ export default function HomeScreen() {
           </Pressable>
         </View>
 
-        <FlatList
-          data={filtered}
-          keyExtractor={(item) => item.id}
-          scrollEnabled={false}
-          ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
-          renderItem={({ item }) => (
-            <View style={styles.card}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.cardTitle}>{item.name}</Text>
-                <Text style={styles.cardPrice}>R$ {item.price.toFixed(2)}</Text>
-              </View>
+        {loading ? (
+          <Text style={{ textAlign: "center", marginVertical: 24 }}>Carregando produtos...</Text>
+        ) : error ? (
+          <Text style={{ color: "#b00", textAlign: "center", marginVertical: 24 }}>{error}</Text>
+        ) : (
+          <FlatList
+            data={filtered}
+            keyExtractor={(item) => item.id}
+            scrollEnabled={false}
+            ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+            renderItem={({ item }) => (
+              <View style={styles.card}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cardTitle}>{item.name}</Text>
+                  <Text style={styles.cardPrice}>R$ {item.price.toFixed(2)}</Text>
+                </View>
 
-              <Pressable
-                style={styles.addBtn}
-                onPress={() => {
-                  setSelectedProduct(item);
-                  setModalVisible(true);
-                }}
-              >
-                <Text style={styles.addBtnText}>Adicionar</Text>
-              </Pressable>
-            </View>
-          )}
-        />
+                <Pressable
+                  style={styles.addBtn}
+                  onPress={() => {
+                    setSelectedProduct(item);
+                    setModalVisible(true);
+                  }}
+                >
+                  <Text style={styles.addBtnText}>Adicionar</Text>
+                </Pressable>
+              </View>
+            )}
+          />
+        )}
         <ProductModal
           visible={modalVisible}
           product={selectedProduct}

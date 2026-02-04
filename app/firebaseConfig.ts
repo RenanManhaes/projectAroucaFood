@@ -13,7 +13,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyDFOZITJ8YNb8XuIaXZQ_u1yut9xhFF9eE",
   authDomain: "arouca-food.firebaseapp.com",
   projectId: "arouca-food",
-  storageBucket: "arouca-food.firebasestorage.app",
+  storageBucket: "arouca-food.appspot.com",
   messagingSenderId: "271556033301",
   appId: "1:271556033301:web:0ef7c5d7ca86a9fbc0471c",
   measurementId: "G-F0RK7ZB3CJ"
