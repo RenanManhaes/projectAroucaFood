@@ -54,6 +54,21 @@ export const styles = StyleSheet.create({
     fontSize: 16,
     color: "#111",
   },
+  cartInfoRow: {
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  cartInfo: {
+    fontSize: 14,
+    color: "#222",
+    fontWeight: "700",
+  },
+  cartMessage: {
+    marginTop: 4,
+    color: BRAND,
+    fontSize: 13,
+    fontWeight: "700",
+  },
   sectionHeader: {
     marginTop: 12,
     flexDirection: "row",

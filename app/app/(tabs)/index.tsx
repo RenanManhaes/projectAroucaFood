@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   FlatList,
   Image,
   Pressable,
@@ -8,11 +9,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ProductModal } from "@/components/ProductModal";
 import { db } from "@/firebaseConfig";
 import type { Product } from "@/types/Product";
 import { collection, getDocs } from "firebase/firestore";
+import { addOrIncrementItem, getCart } from "@/storage/cart";
 import { styles } from "./index.styles";
 
 type ProductWithCategory = Product & { category?: string | null };
@@ -28,6 +31,8 @@ export default function HomeScreen() {
   const [products, setProducts] = useState<ProductWithCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [cartCount, setCartCount] = useState(0);
+  const [cartMessage, setCartMessage] = useState<string | null>(null);
 
   const categories = useMemo(
     () => [
@@ -41,6 +46,18 @@ export default function HomeScreen() {
 
   useEffect(() => {
     let active = true;
+
+    const syncCart = async () => {
+      try {
+        const items = await getCart();
+        if (!active) return;
+        const total = items.reduce((sum, item) => sum + item.qty, 0);
+        setCartCount(total);
+      } catch (err) {
+        console.warn("Falha ao carregar carrinho", err);
+      }
+    };
+    syncCart();
 
     async function fetchProducts() {
       setLoading(true);
@@ -78,6 +95,26 @@ export default function HomeScreen() {
     };
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      const syncCart = async () => {
+        try {
+          const items = await getCart();
+          if (!active) return;
+          const total = items.reduce((sum, item) => sum + item.qty, 0);
+          setCartCount(total);
+        } catch (err) {
+          console.warn("Falha ao carregar carrinho", err);
+        }
+      };
+      syncCart();
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
+
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return products.filter((p) => {
@@ -90,6 +127,19 @@ export default function HomeScreen() {
       return matchesQuery && matchesCategory;
     });
   }, [products, query, selectedCategory]);
+
+  const handleAddToCart = async (product: Product, quantity = 1) => {
+    try {
+      const updated = await addOrIncrementItem(product, quantity);
+      const total = updated.reduce((sum, item) => sum + item.qty, 0);
+      setCartCount(total);
+      setCartMessage(`${product.name} adicionado ao carrinho`);
+      setTimeout(() => setCartMessage(null), 1800);
+      setModalVisible(false);
+    } catch (err) {
+      Alert.alert("Erro", "Não foi possível adicionar ao carrinho. Tente novamente.");
+    }
+  };
 
   return (
     <View style={styles.container}>
@@ -112,6 +162,11 @@ export default function HomeScreen() {
             onChangeText={setQuery}
             style={styles.search}
           />
+        </View>
+
+        <View style={styles.cartInfoRow}>
+          <Text style={styles.cartInfo}>Carrinho: {cartCount} item(s)</Text>
+          {cartMessage ? <Text style={styles.cartMessage}>{cartMessage}</Text> : null}
         </View>
 
         <Text style={styles.sectionTitle}>Categorias</Text>
@@ -188,6 +243,7 @@ export default function HomeScreen() {
           visible={modalVisible}
           product={selectedProduct}
           onClose={() => setModalVisible(false)}
+          onAdd={(product, qty) => handleAddToCart(product, qty)}
         />
       </ScrollView>
     </View>
