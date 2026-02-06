@@ -2,16 +2,20 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Image,
+  ImageBackground,
   Pressable,
-  StyleSheet,
   Text,
   View,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCart, setQuantity, removeItem, clearCart, type CartItem } from "@/storage/cart";
+import { styles } from "./cart.styles";
 
 const BRAND = "#942229";
+const bgImage = require("../../assets/images/cart-background.jpeg");
+const placeholderProduct = require("../../assets/images/logo.png");
 
 export default function CartScreen() {
   const [items, setItems] = useState<CartItem[]>([]);
@@ -53,184 +57,85 @@ export default function CartScreen() {
 
   const renderItem = ({ item }: { item: CartItem }) => (
     <View style={styles.card}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.cardTitle}>{item.name}</Text>
+      <Image
+        source={placeholderProduct}
+        style={styles.productImg}
+        resizeMode="cover"
+      />
+
+      <View style={styles.cardBody}>
+        <View style={styles.cardHeaderRow}>
+          <Text style={styles.cardTitle} numberOfLines={2}>
+            {item.name}
+          </Text>
+          <Text style={styles.itemPrice}>R$ {item.price.toFixed(2)}</Text>
+        </View>
         <Text style={styles.cardCategory}>{item.category || ""}</Text>
-        <Text style={styles.cardPrice}>R$ {item.price.toFixed(2)}</Text>
-      </View>
 
-      <View style={styles.qtyWrap}>
-        <Pressable style={styles.qtyBtn} onPress={() => handleQty(item.productId, item.qty - 1)}>
-          <Text style={styles.qtyBtnText}>-</Text>
-        </Pressable>
-        <Text style={styles.qtyText}>{item.qty}</Text>
-        <Pressable style={styles.qtyBtn} onPress={() => handleQty(item.productId, item.qty + 1)}>
-          <Text style={styles.qtyBtnText}>+</Text>
-        </Pressable>
+        <View style={styles.qtyRow}>
+          <View style={styles.qtyControl}>
+            <Pressable style={styles.qtyBtn} onPress={() => handleQty(item.productId, item.qty - 1)}>
+              <Text style={styles.qtyBtnText}>-</Text>
+            </Pressable>
+            <View style={styles.qtyValueBox}>
+              <Text style={styles.qtyText}>{item.qty}</Text>
+            </View>
+            <Pressable style={styles.qtyBtn} onPress={() => handleQty(item.productId, item.qty + 1)}>
+              <Text style={styles.qtyBtnText}>+</Text>
+            </Pressable>
+          </View>
+          <Pressable style={styles.removeLink} onPress={() => handleRemove(item.productId)}>
+            <Text style={styles.removeLinkText}>Remover</Text>
+          </Pressable>
+        </View>
       </View>
-
-      <Pressable style={styles.removeBtn} onPress={() => handleRemove(item.productId)}>
-        <Text style={styles.removeBtnText}>Remover</Text>
-      </Pressable>
     </View>
   );
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Meu Carrinho</Text>
-        <Text style={styles.headerSubtitle}>
-          {items.length} item(s) • Total R$ {total.toFixed(2)}
-        </Text>
-      </View>
-
-      {loading ? (
-        <ActivityIndicator style={{ marginTop: 24 }} color={BRAND} />
-      ) : items.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>Seu carrinho está vazio</Text>
-          <Text style={styles.emptySubtitle}>Adicione produtos na Home para vê-los aqui.</Text>
+    <ImageBackground source={bgImage} style={styles.bg} imageStyle={styles.bgImage}>
+      <View style={styles.bgOverlay} />
+      <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
+        <View style={styles.topBar}>
+          <Text style={styles.topTitle}>Seu Carrinho</Text>
         </View>
-      ) : (
-        <FlatList
-          data={items}
-          keyExtractor={(item) => item.productId}
-          contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
-          ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
-          renderItem={renderItem}
-          ListFooterComponent={() => (
-            <View style={styles.footer}>
-              <Text style={styles.totalText}>Total: R$ {total.toFixed(2)}</Text>
-              <Pressable style={styles.clearBtn} onPress={handleClear}>
-                <Text style={styles.clearBtnText}>Limpar carrinho</Text>
-              </Pressable>
-            </View>
-          )}
-        />
-      )}
-    </SafeAreaView>
+
+        {loading ? (
+          <ActivityIndicator style={{ marginTop: 24 }} color={BRAND} />
+        ) : items.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyTitle}>Seu carrinho está vazio</Text>
+            <Text style={styles.emptySubtitle}>Adicione produtos na Home para vê-los aqui.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={items}
+            keyExtractor={(item) => item.productId}
+            contentContainerStyle={styles.listContent}
+            ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+            renderItem={renderItem}
+            ListFooterComponent={() => (
+              <View style={styles.summaryCard}>
+                <View style={styles.totalRow}>
+                  <View style={{ gap: 6 }}>
+                    <Text style={styles.totalLabel}>Total:</Text>
+                    {/* Hiperlink to clear cart
+                    <Pressable onPress={handleClear} hitSlop={6}>
+                      <Text style={styles.clearLink}>Limpar carrinho</Text>
+                    </Pressable>
+                    */}
+                  </View>
+                  <Text style={styles.totalValue}>R$ {total.toFixed(2)}</Text>
+                </View>
+                <Pressable style={styles.checkoutBtn} onPress={() => {}}>
+                  <Text style={styles.checkoutText}>Finalizar compra</Text>
+                </Pressable>
+              </View>
+            )}
+          />
+        )}
+      </SafeAreaView>
+    </ImageBackground>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F7F5F2",
-  },
-  header: {
-    paddingTop: 12,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#111",
-  },
-  headerSubtitle: {
-    marginTop: 4,
-    color: "#444",
-    fontWeight: "600",
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#111",
-    textAlign: "center",
-  },
-  emptySubtitle: {
-    marginTop: 6,
-    color: "#666",
-    textAlign: "center",
-  },
-  card: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E7E2DA",
-    borderRadius: 14,
-    padding: 14,
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#111",
-  },
-  cardCategory: {
-    color: "#666",
-    marginTop: 2,
-  },
-  cardPrice: {
-    marginTop: 6,
-    fontSize: 15,
-    fontWeight: "700",
-    color: BRAND,
-  },
-  qtyWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 10,
-    gap: 8,
-  },
-  qtyBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: "#F0EBE5",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#E0D8CE",
-  },
-  qtyBtnText: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#222",
-  },
-  qtyText: {
-    minWidth: 26,
-    textAlign: "center",
-    fontWeight: "800",
-    color: "#111",
-  },
-  removeBtn: {
-    marginTop: 12,
-    alignSelf: "flex-start",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: "#f1d6d6",
-  },
-  removeBtnText: {
-    color: BRAND,
-    fontWeight: "700",
-  },
-  footer: {
-    marginTop: 16,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#E7E2DA",
-    gap: 12,
-  },
-  totalText: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#111",
-  },
-  clearBtn: {
-    alignSelf: "flex-start",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: BRAND,
-  },
-  clearBtnText: {
-    color: "#fff",
-    fontWeight: "800",
-  },
-});

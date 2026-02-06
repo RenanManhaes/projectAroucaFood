@@ -73,6 +73,9 @@ export default function HomeScreen() {
             name: data?.name ?? "Produto sem nome",
             price: Number(data?.price) || 0,
             category: data?.category ?? null,
+            highlights: Boolean(data?.highlights),
+            createdAt: data?.createdAt ?? null,
+            updatedAt: data?.updatedAt ?? null,
           };
         });
 
@@ -127,6 +130,11 @@ export default function HomeScreen() {
       return matchesQuery && matchesCategory;
     });
   }, [products, query, selectedCategory]);
+
+  const filteredHighlights = useMemo(
+    () => filtered.filter((p) => p.highlights),
+    [filtered]
+  );
 
   const handleAddToCart = async (product: Product, quantity = 1) => {
     try {
@@ -197,13 +205,51 @@ export default function HomeScreen() {
         />
 
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Destaques</Text>
+          <Text style={styles.sectionTitle}>Promoções</Text>
           <Pressable>
             <Text style={styles.link}>Ver todos</Text>
           </Pressable>
         </View>
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        {loading ? (
+          <Text style={styles.loadingText}>Carregando produtos...</Text>
+        ) : (
+          <FlatList
+            data={filteredHighlights}
+            keyExtractor={(item) => item.id}
+            scrollEnabled={false}
+            ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+            ListEmptyComponent={
+              !loading ? (
+                <Text style={styles.emptyText}>Nenhum produto em promoção.</Text>
+              ) : null
+            }
+            renderItem={({ item }) => (
+              <View style={styles.card}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cardTitle}>{item.name}</Text>
+                  <Text style={styles.cardPrice}>R$ {item.price.toFixed(2)}</Text>
+                </View>
+
+                <Pressable
+                  style={styles.addBtn}
+                  onPress={() => {
+                    setSelectedProduct(item);
+                    setModalVisible(true);
+                  }}
+                >
+                  <Text style={styles.addBtnText}>Ver mais</Text>
+                </Pressable>
+              </View>
+              
+            )}
+          />
+        )}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Todos os Produtos</Text>
+        </View>
 
         {loading ? (
           <Text style={styles.loadingText}>Carregando produtos...</Text>
@@ -232,13 +278,12 @@ export default function HomeScreen() {
                     setModalVisible(true);
                   }}
                 >
-                  <Text style={styles.addBtnText}>Adicionar</Text>
+                  <Text style={styles.addBtnText}>Ver mais</Text>
                 </Pressable>
               </View>
             )}
           />
         )}
-
         <ProductModal
           visible={modalVisible}
           product={selectedProduct}
