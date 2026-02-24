@@ -7,7 +7,11 @@ export const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "transparent" },
   bg: { flex: 1, padding: 20, justifyContent: "center" },
   bgImage: { opacity: 0.28, resizeMode: "cover" },
-  content: { flexGrow: 1, justifyContent: "center" },
+  content: {
+    flexGrow: 1,
+    paddingVertical: 24,
+    paddingBottom: 40,
+  },
   card: {
     backgroundColor: CREAM,
     borderRadius: 20,

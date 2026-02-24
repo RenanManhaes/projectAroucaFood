@@ -227,9 +227,6 @@ export default function HomeScreen() {
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Promoções</Text>
-          <Pressable>
-            <Text style={styles.link}>Ver todos</Text>
-          </Pressable>
         </View>
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -272,6 +269,9 @@ export default function HomeScreen() {
         )}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Todos os Produtos</Text>
+          <Pressable>
+            <Text style={styles.link}>Ver todos</Text>
+          </Pressable>
         </View>
 
         {loading ? (

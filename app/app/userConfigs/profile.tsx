@@ -25,6 +25,10 @@ export default function ProfileScreen() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
+  const [addressNumber, setAddressNumber] = useState("");
+  const [complement, setComplement] = useState("");
+  const [cep, setCep] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -34,7 +38,15 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const [profileData, setProfileData] = useState<{ name?: string; phone?: string; email?: string } | null>(null);
+  const [profileData, setProfileData] = useState<{
+    name?: string;
+    phone?: string;
+    email?: string;
+    address?: string | null;
+    addressNumber?: string | null;
+    complement?: string | null;
+    cep?: string | null;
+  } | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const isAdmin = useMemo(() => {
     const email = user?.email?.toLowerCase();
@@ -44,6 +56,10 @@ export default function ProfileScreen() {
   const resetFormFields = () => {
     setFullName("");
     setPhone("");
+    setAddress("");
+    setAddressNumber("");
+    setComplement("");
+    setCep("");
     setEmail("");
     setPassword("");
     setConfirm("");
@@ -66,7 +82,15 @@ export default function ProfileScreen() {
         const snap = await getDoc(ref);
         if (snap.exists()) {
           const data = snap.data();
-          setProfileData({ name: data?.name, phone: data?.phone, email: data?.email });
+          setProfileData({
+            name: data?.name,
+            phone: data?.phone,
+            email: data?.email,
+            address: data?.address,
+            addressNumber: data?.addressNumber,
+            complement: data?.complement,
+            cep: data?.cep,
+          });
         }
       } catch (err) {
         console.warn("Falha ao carregar perfil", err);
@@ -97,6 +121,11 @@ export default function ProfileScreen() {
       return;
     }
 
+    if (mode === "signup" && (!address.trim() || !addressNumber.trim() || !cep.trim())) {
+      Alert.alert("Atenção", "Endereço, número e CEP são obrigatórios.");
+      return;
+    }
+
     if (mode === "signup" && trimmedPass !== confirm.trim()) {
       Alert.alert("Atenção", "As senhas não conferem.");
       return;
@@ -124,8 +153,11 @@ export default function ProfileScreen() {
           uid: userCred.user.uid,
           name: fullName.trim(),
           phone: phone.trim(),
+          address: address.trim(),
+          addressNumber: addressNumber.trim(),
+          complement: complement.trim() || null,
+          cep: cep.trim(),
           email: userCred.user.email ?? trimmedEmail,
-          role: "user",
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
@@ -168,7 +200,10 @@ export default function ProfileScreen() {
           imageStyle={styles.bgImage}
           blurRadius={8}
         >
-          <View style={[styles.content, { justifyContent: "center", flexGrow: 1 }]}> 
+          <ScrollView
+            contentContainerStyle={styles.content}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={styles.card}>
               <Text style={styles.title}>Admin</Text>
               <Text style={styles.subtitle}>{user.email}</Text>
@@ -182,7 +217,7 @@ export default function ProfileScreen() {
                 </Pressable>
               </View>
             </View>
-          </View>
+          </ScrollView>
         </ImageBackground>
       </SafeAreaView>
     );
@@ -192,6 +227,10 @@ export default function ProfileScreen() {
     const displayName = profileData?.name || user.displayName || fullName || "Nome não informado";
     const phoneNumber = profileData?.phone || user.phoneNumber || phone || "Telefone não informado";
     const profileEmail = profileData?.email || user.email || email || "Email não informado";
+    const displayAddress = profileData?.address || "Endereço não informado";
+    const displayAddressNumber = profileData?.addressNumber || "Número não informado";
+    const displayComplement = profileData?.complement || "Complemento não informado";
+    const displayCep = profileData?.cep || "CEP não informado";
 
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -201,7 +240,10 @@ export default function ProfileScreen() {
           imageStyle={styles.bgImage}
           blurRadius={8}
         >
-          <View style={[styles.content, { justifyContent: "center", flexGrow: 1 }]}> 
+          <ScrollView
+            contentContainerStyle={styles.content}
+            showsVerticalScrollIndicator={true}
+          >
             <View style={styles.card}>
               <Text style={styles.title}>Meu Perfil</Text>
               <Text style={styles.subtitle}>Confira seus dados cadastrados.</Text>
@@ -215,6 +257,18 @@ export default function ProfileScreen() {
 
                 <Text style={styles.label}>Email</Text>
                 <Text style={styles.input}>{profileEmail}</Text>
+
+                <Text style={styles.label}>Endereço</Text>
+                <Text style={styles.input}>{displayAddress}</Text>
+
+                <Text style={styles.label}>Número</Text>
+                <Text style={styles.input}>{displayAddressNumber}</Text>
+
+                <Text style={styles.label}>Complemento</Text>
+                <Text style={styles.input}>{displayComplement}</Text>
+
+                <Text style={styles.label}>CEP</Text>
+                <Text style={styles.input}>{displayCep}</Text>
               </View>
 
               <View style={{ gap: 10, marginTop: 16 }}>
@@ -226,7 +280,7 @@ export default function ProfileScreen() {
                 </Pressable>
               </View>
             </View>
-          </View>
+          </ScrollView>
         </ImageBackground>
       </SafeAreaView>
     );
@@ -275,6 +329,52 @@ export default function ProfileScreen() {
                       placeholder="(00) 00000-0000"
                       placeholderTextColor="#888"
                       keyboardType="phone-pad"
+                      style={styles.input}
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Endereço</Text>
+                    <TextInput
+                      value={address}
+                      onChangeText={setAddress}
+                      placeholder="Rua Exemplo"
+                      placeholderTextColor="#888"
+                      style={styles.input}
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Número</Text>
+                    <TextInput
+                      value={addressNumber}
+                      onChangeText={setAddressNumber}
+                      placeholder="123"
+                      placeholderTextColor="#888"
+                      keyboardType="number-pad"
+                      style={styles.input}
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Complemento (opcional)</Text>
+                    <TextInput
+                      value={complement}
+                      onChangeText={setComplement}
+                      placeholder="Apto, bloco..."
+                      placeholderTextColor="#888"
+                      style={styles.input}
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>CEP</Text>
+                    <TextInput
+                      value={cep}
+                      onChangeText={setCep}
+                      placeholder="00000-000"
+                      placeholderTextColor="#888"
+                      keyboardType="number-pad"
                       style={styles.input}
                     />
                   </View>

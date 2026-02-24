@@ -136,6 +136,8 @@ export default function EstoqueScreen() {
     });
     setForm((f) => ({ ...f, category: value }));
     setNewCategory('');
+    // Força recarregar a tela para garantir que a nova categoria apareça em todos os componentes
+    setTimeout(() => router.replace('/adminConfigs/estoque'), 50);
   };
 
   const handleRemoveCategory = (cat: string) => {
