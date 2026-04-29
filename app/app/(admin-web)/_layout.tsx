@@ -16,10 +16,12 @@ import { BRAND_PRIMARY } from '@/constants/ui/colors';
 const BRAND = BRAND_PRIMARY;
 const SIDEBAR_W = 220;
 
-const NAV_ITEMS = [
-  { label: 'Dashboard', path: '/(admin-web)/dashboard', icon: '📊' },
+type AdminWebPath = '/(admin-web)/estoque' | '/(admin-web)/pedidos' | '/(admin-web)/usuarios';
+
+const NAV_ITEMS: { label: string; path: AdminWebPath; icon: string }[] = [
   { label: 'Estoque', path: '/(admin-web)/estoque', icon: '📦' },
   { label: 'Pedidos', path: '/(admin-web)/pedidos', icon: '🛒' },
+  { label: 'Usuários', path: '/(admin-web)/usuarios', icon: '👥' },
 ];
 
 export default function AdminWebLayout() {
@@ -127,7 +129,7 @@ export default function AdminWebLayout() {
               <Pressable
                 key={item.path}
                 style={[styles.navItem, isActive && styles.navItemActive]}
-                onPress={() => router.push(item.path as any)}
+                onPress={() => router.push(item.path)}
               >
                 <Text style={styles.navIcon}>{item.icon}</Text>
                 <Text style={[styles.navLabel, isActive && styles.navLabelActive]}>
@@ -159,7 +161,7 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     backgroundColor: '#f4f1ee',
-    minHeight: '100%' as any,
+    minHeight: '100%',
   },
   centered: {
     flex: 1,
@@ -223,7 +225,7 @@ const styles = StyleSheet.create({
     flexDirection: 'column',
     paddingTop: 24,
     paddingBottom: 24,
-    minHeight: '100%' as any,
+    minHeight: '100%',
   },
   sidebarHeader: {
     alignItems: 'center',
@@ -275,6 +277,6 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     backgroundColor: '#f4f1ee',
-    overflow: 'scroll' as any,
+    overflow: 'scroll',
   },
 });

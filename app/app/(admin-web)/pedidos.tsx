@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,15 +14,17 @@ import {
 import {
   addDoc,
   collection,
+  doc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   updateDoc,
-  doc,
+  writeBatch,
 } from 'firebase/firestore';
 import { auth, db } from '@/config/firebase';
-import type { Order, OrderItem, OrderStatus } from '@/types/Order';
+import type { Order, OrderStatus } from '@/types/Order';
 import {
   ORDER_STATUS_COLORS,
   ORDER_STATUS_FLOW,
@@ -30,90 +34,182 @@ import { BRAND_PRIMARY } from '@/constants/ui/colors';
 
 const BRAND = BRAND_PRIMARY;
 
-const ALL_STATUSES: (OrderStatus | 'all')[] = [
-  'all',
-  'novo',
-  'em_preparo',
-  'pronto',
-  'entregue',
-  'cancelado',
+const BOARD_SECTIONS: { key: OrderStatus; title: string }[] = [
+  { key: 'novo', title: 'Aguardando aceite' },
+  { key: 'em_preparo', title: 'Em preparo' },
+  { key: 'pronto', title: 'Pronto para coleta/entrega' },
+  { key: 'cancelado', title: 'Cancelados' },
+  { key: 'entregue', title: 'Concluídos' },
 ];
 
-type NewItem = { name: string; price: string; qty: string };
+type CancelModalState = {
+  order: Order;
+  reason: string;
+};
+
+const LOCAL_STATUS_LABELS: Record<OrderStatus, string> = {
+  ...ORDER_STATUS_LABELS,
+  novo: 'Aguardando aceite',
+  entregue: 'Concluído',
+};
+
+const normalizeOptionalString = (value: unknown) => {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+};
+
+const confirmAction = async (title: string, message: string, confirmText = 'Confirmar') => {
+  if (Platform.OS === 'web') {
+    return globalThis.confirm?.(`${title}\n\n${message}`) ?? false;
+  }
+
+  return new Promise<boolean>((resolve) => {
+    Alert.alert(
+      title,
+      message,
+      [
+        { text: 'Cancelar', style: 'cancel', onPress: () => resolve(false) },
+        { text: confirmText, onPress: () => resolve(true) },
+      ],
+      { cancelable: true, onDismiss: () => resolve(false) }
+    );
+  });
+};
+
+const getPaymentLabel = (order: Order) => {
+  const value =
+    order.paymentMethod ??
+    null;
+
+  if (!value || typeof value !== 'string') return '-';
+  return value;
+};
+
+const formatDateTime = (order: Order) => {
+  if (!order.createdAt || typeof order.createdAt?.toDate !== 'function') return '-';
+  return order.createdAt.toDate().toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const getElapsedMinutes = (order: Order) => {
+  if (!order.createdAt || typeof order.createdAt?.toDate !== 'function') return null;
+  const created = order.createdAt.toDate().getTime();
+  const now = Date.now();
+  return Math.max(0, Math.floor((now - created) / 60000));
+};
+
+const getElapsedLabel = (order: Order) => {
+  const mins = getElapsedMinutes(order);
+  if (mins === null) return '-';
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}min`;
+};
+
+const isOrderDelayed = (order: Order) => {
+  const mins = getElapsedMinutes(order);
+  if (mins === null) return false;
+
+  if (order.status === 'novo') return mins > 10;
+  if (order.status === 'em_preparo') return mins > 25;
+  if (order.status === 'pronto') return mins > 10;
+  return false;
+};
 
 export default function PedidosWebScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<OrderStatus | 'all'>('all');
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<Order | null>(null);
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState(false);
-
-  // New order form
-  const [showNewForm, setShowNewForm] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newPhone, setNewPhone] = useState('');
-  const [newAddress, setNewAddress] = useState('');
-  const [newNotes, setNewNotes] = useState('');
-  const [newItems, setNewItems] = useState<NewItem[]>([{ name: '', price: '', qty: '1' }]);
-  const [saving, setSaving] = useState(false);
+  const [cancelModal, setCancelModal] = useState<CancelModalState | null>(null);
+  const [managingTestOrders, setManagingTestOrders] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'pedidos'), orderBy('createdAt', 'desc'));
-    const unsub = onSnapshot(q, (snap) => {
-      const list: Order[] = snap.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: d.id,
-          customerName: data?.customerName ?? '-',
-          customerEmail: data?.customerEmail ?? null,
-          customerPhone: data?.customerPhone ?? null,
-          customerAddress: data?.customerAddress ?? null,
-          items: Array.isArray(data?.items) ? data.items : [],
-          total: Number(data?.total) || 0,
-          status: data?.status ?? 'novo',
-          origem: data?.origem ?? null,
-          notes: data?.notes ?? null,
-          createdAt: data?.createdAt ?? null,
-          updatedAt: data?.updatedAt ?? null,
-          updatedBy: data?.updatedBy ?? null,
-        };
-      });
-      setOrders(list);
-      setLoading(false);
-      // refresh selected if open
-      setSelected((current) => {
-        if (!current) return current;
-        const refreshed = list.find((o) => o.id === current.id);
-        return refreshed ?? current;
-      });
-    });
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: Order[] = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            customerName: normalizeOptionalString(data?.customerName) ?? '-',
+            customerEmail: normalizeOptionalString(data?.customerEmail),
+            customerPhone: normalizeOptionalString(data?.customerPhone),
+            customerAddress: normalizeOptionalString(data?.customerAddress),
+            items: Array.isArray(data?.items) ? data.items : [],
+            total: Number(data?.total) || 0,
+            status: data?.status ?? 'novo',
+            origem: data?.origem ?? null,
+            notes: normalizeOptionalString(data?.notes),
+            paymentMethod: normalizeOptionalString(data?.paymentMethod ?? data?.payment?.method ?? data?.formaPagamento),
+            cancellationReason: normalizeOptionalString(data?.cancellationReason ?? data?.cancelReason ?? data?.cancelamentoMotivo),
+            createdAt: data?.createdAt ?? null,
+            updatedAt: data?.updatedAt ?? null,
+            updatedBy: normalizeOptionalString(data?.updatedBy),
+          };
+        });
+
+        setOrders(list);
+        setLoading(false);
+
+        setSelectedOrder((current) => {
+          if (!current) return current;
+          const refreshed = list.find((o) => o.id === current.id);
+          return refreshed ?? null;
+        });
+
+        setCancelModal((current) => {
+          if (!current) return current;
+          const refreshed = list.find((o) => o.id === current.order.id);
+          return refreshed ? { ...current, order: refreshed } : null;
+        });
+      },
+      () => {
+        setOrders([]);
+        setLoading(false);
+      }
+    );
     return unsub;
   }, []);
 
-  const filtered = useMemo(() => {
-    let list = orders;
-    if (statusFilter !== 'all') list = list.filter((o) => o.status === statusFilter);
+  const filteredOrders = useMemo(() => {
+    let list = [...orders];
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
         (o) =>
           o.customerName.toLowerCase().includes(q) ||
           (o.customerPhone ?? '').includes(q) ||
-          o.id.toLowerCase().includes(q)
+          (o.customerAddress ?? '').toLowerCase().includes(q) ||
+          o.id.toLowerCase().includes(q) ||
+          o.items.some((item) => item.name.toLowerCase().includes(q))
       );
     }
     return list;
-  }, [orders, statusFilter, search]);
+  }, [orders, search]);
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: orders.length };
-    for (const status of ORDER_STATUS_FLOW) {
-      c[status] = orders.filter((o) => o.status === status).length;
-    }
-    c['cancelado'] = orders.filter((o) => o.status === 'cancelado').length;
-    return c;
-  }, [orders]);
+  const ordersByStatus = useMemo(() => {
+    const grouped: Record<OrderStatus, Order[]> = {
+      novo: [],
+      em_preparo: [],
+      pronto: [],
+      entregue: [],
+      cancelado: [],
+    };
+    filteredOrders.forEach((order) => grouped[order.status].push(order));
+    return grouped;
+  }, [filteredOrders]);
+
+  const delayedTotal = useMemo(() => {
+    return filteredOrders.filter((order) => isOrderDelayed(order)).length;
+  }, [filteredOrders]);
 
   const handleStatusChange = async (order: Order, newStatus: OrderStatus) => {
     if (order.status === newStatus) return;
@@ -121,6 +217,7 @@ export default function PedidosWebScreen() {
     try {
       await updateDoc(doc(db, 'pedidos', order.id), {
         status: newStatus,
+        cancellationReason: newStatus === 'cancelado' ? order.cancellationReason ?? null : null,
         updatedAt: serverTimestamp(),
         updatedBy: auth.currentUser?.email ?? null,
       });
@@ -131,383 +228,582 @@ export default function PedidosWebScreen() {
     }
   };
 
-  const handleCancel = async (order: Order) => {
-    Alert.alert('Cancelar pedido', `Cancelar o pedido de "${order.customerName}"?`, [
-      { text: 'Não', style: 'cancel' },
-      {
-        text: 'Cancelar pedido',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await updateDoc(doc(db, 'pedidos', order.id), {
-              status: 'cancelado',
-              updatedAt: serverTimestamp(),
-              updatedBy: auth.currentUser?.email ?? null,
-            });
-          } catch {
-            Alert.alert('Erro', 'Não foi possível cancelar.');
-          }
-        },
-      },
-    ]);
+  const openCancelModal = (order: Order) => {
+    setCancelModal({ order, reason: '' });
   };
 
-  const nextStatus = (current: OrderStatus): OrderStatus | null => {
+  const handleCancelWithReason = async () => {
+    if (!cancelModal) return;
+    const reason = cancelModal.reason.trim();
+    if (!reason) {
+      Alert.alert('Atenção', 'Informe um motivo para o cancelamento.');
+      return;
+    }
+
+    setUpdatingStatus(true);
+    try {
+      await updateDoc(doc(db, 'pedidos', cancelModal.order.id), {
+        status: 'cancelado',
+        cancellationReason: reason,
+        updatedAt: serverTimestamp(),
+        updatedBy: auth.currentUser?.email ?? null,
+      });
+      setCancelModal(null);
+    } catch {
+      Alert.alert('Erro', 'Não foi possível cancelar o pedido.');
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
+
+  const getNextStatus = (current: OrderStatus): OrderStatus | null => {
     const idx = ORDER_STATUS_FLOW.indexOf(current);
     if (idx === -1 || idx === ORDER_STATUS_FLOW.length - 1) return null;
     return ORDER_STATUS_FLOW[idx + 1];
   };
 
-  // New order form
-  const addItemRow = () => setNewItems((prev) => [...prev, { name: '', price: '', qty: '1' }]);
-  const removeItemRow = (i: number) => setNewItems((prev) => prev.filter((_, idx) => idx !== i));
-  const updateItemRow = (i: number, field: keyof NewItem, value: string) => {
-    setNewItems((prev) => prev.map((row, idx) => (idx === i ? { ...row, [field]: value } : row)));
+  const isTestOrder = (order: Partial<Order>) => {
+    const name = String(order.customerName ?? '').toLowerCase();
+    const notes = String(order.notes ?? '').toLowerCase();
+    const email = String(order.customerEmail ?? '').toLowerCase();
+    return (
+      name.startsWith('teste ') ||
+      name.startsWith('cliente teste') ||
+      notes.includes('pedido teste') ||
+      email === 'cliente.teste@exemplo.com'
+    );
   };
 
-  const handleCreateOrder = async () => {
-    if (!newName.trim()) { Alert.alert('Atenção', 'Informe o nome do cliente.'); return; }
-    const validItems: OrderItem[] = newItems
-      .filter((it) => it.name.trim())
-      .map((it) => ({
-        name: it.name.trim(),
-        price: Number(it.price.replace(',', '.')) || 0,
-        qty: Math.max(1, Number(it.qty) || 1),
-      }));
-    if (validItems.length === 0) { Alert.alert('Atenção', 'Adicione pelo menos um item.'); return; }
-    const total = validItems.reduce((sum, it) => sum + it.price * it.qty, 0);
-    setSaving(true);
+  const handleCreateTestOrders = async () => {
+    const confirmed = await confirmAction(
+      'Criar pedidos teste',
+      'Deseja criar pedidos de teste na base?',
+      'Criar'
+    );
+    if (!confirmed) return;
+
+    setManagingTestOrders(true);
     try {
-      await addDoc(collection(db, 'pedidos'), {
-        customerName: newName.trim(),
-        customerPhone: newPhone.trim() || null,
-        customerAddress: newAddress.trim() || null,
-        items: validItems,
-        total,
-        status: 'novo',
-        origem: 'manual',
-        notes: newNotes.trim() || null,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        updatedBy: auth.currentUser?.email ?? null,
-      });
-      setNewName(''); setNewPhone(''); setNewAddress(''); setNewNotes('');
-      setNewItems([{ name: '', price: '', qty: '1' }]);
-      setShowNewForm(false);
-    } catch (err: any) {
-      Alert.alert('Erro', err?.message ?? 'Não foi possível criar o pedido.');
+      const basePayload = {
+        customerEmail: 'cliente.teste@exemplo.com',
+        customerPhone: '(11) 98888-0000',
+        customerAddress: 'Rua Teste Fluxo, 456',
+        origem: 'manual' as const,
+        paymentMethod: 'pix',
+        updatedBy: auth.currentUser?.email ?? 'admin-web',
+      };
+
+      const testOrders = [
+        {
+          customerName: 'Teste Novo',
+          status: 'novo' as OrderStatus,
+          notes: 'Pedido teste - aguardando aceite',
+          items: [
+            { name: 'Contra File 500g', price: 54.9, qty: 1 },
+            { name: 'Carvao 3kg', price: 19.9, qty: 1 },
+          ],
+          total: 74.8,
+        },
+        {
+          customerName: 'Teste Preparo',
+          status: 'em_preparo' as OrderStatus,
+          notes: 'Pedido teste - em preparo',
+          items: [{ name: 'Picanha 700g', price: 89.9, qty: 1 }],
+          total: 89.9,
+        },
+        {
+          customerName: 'Teste Cancelado',
+          status: 'cancelado' as OrderStatus,
+          notes: 'Pedido teste - cancelado',
+          cancellationReason: 'Cliente desistiu do pedido',
+          items: [{ name: 'Espeto Frango', price: 14.9, qty: 3 }],
+          total: 44.7,
+        },
+        {
+          customerName: 'Teste Concluido',
+          status: 'entregue' as OrderStatus,
+          notes: 'Pedido teste - concluido',
+          items: [{ name: 'Linguica Toscana 1kg', price: 32.9, qty: 2 }],
+          total: 65.8,
+        },
+      ];
+
+      for (const item of testOrders) {
+        await addDoc(collection(db, 'pedidos'), {
+          ...basePayload,
+          ...item,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      Alert.alert('Sucesso', 'Pedidos de teste criados com sucesso.');
+    } catch {
+      Alert.alert('Erro', 'Não foi possível criar os pedidos de teste.');
     } finally {
-      setSaving(false);
+      setManagingTestOrders(false);
     }
   };
 
-  const formatDate = (order: Order) => {
-    if (!order.createdAt) return '-';
-    return order.createdAt.toDate().toLocaleString('pt-BR', {
-      day: '2-digit', month: '2-digit', year: '2-digit',
-      hour: '2-digit', minute: '2-digit',
-    });
+  const handleClearTestOrders = async () => {
+    const confirmed = await confirmAction(
+      'Limpar pedidos teste',
+      'Deseja remover todos os pedidos de teste?',
+      'Remover'
+    );
+    if (!confirmed) return;
+
+    setManagingTestOrders(true);
+    try {
+      const snap = await getDocs(collection(db, 'pedidos'));
+      const refsToDelete = snap.docs.filter((docSnap) => {
+        const data = docSnap.data();
+        return isTestOrder({
+          customerName: typeof data.customerName === 'string' ? data.customerName : undefined,
+          notes: typeof data.notes === 'string' ? data.notes : undefined,
+          customerEmail: typeof data.customerEmail === 'string' ? data.customerEmail : undefined,
+        });
+      });
+
+      if (!refsToDelete.length) {
+        Alert.alert('Aviso', 'Nenhum pedido de teste encontrado.');
+        return;
+      }
+
+      const batch = writeBatch(db);
+      refsToDelete.forEach((docSnap) => {
+        batch.delete(docSnap.ref);
+      });
+      await batch.commit();
+
+      Alert.alert('Sucesso', `${refsToDelete.length} pedido(s) de teste removido(s).`);
+    } catch {
+      Alert.alert('Erro', 'Não foi possível limpar os pedidos de teste.');
+    } finally {
+      setManagingTestOrders(false);
+    }
   };
 
   return (
     <View style={styles.root}>
-      {/* Main list */}
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
         <View style={styles.topRow}>
           <View>
             <Text style={styles.pageTitle}>Pedidos</Text>
-            <Text style={styles.pageSubtitle}>{orders.length} pedidos</Text>
+            <Text style={styles.pageSubtitle}>
+              {filteredOrders.length} pedidos • {delayedTotal} atrasados
+            </Text>
           </View>
-          <Pressable style={styles.primaryBtn} onPress={() => { setShowNewForm(true); setSelected(null); }}>
-            <Text style={styles.primaryBtnText}>+ Novo pedido</Text>
-          </Pressable>
+          <View style={styles.topActionsRow}>
+            <Pressable
+              style={[styles.topActionBtn, styles.topActionPrimary, managingTestOrders && styles.topActionDisabled]}
+              onPress={handleCreateTestOrders}
+              disabled={managingTestOrders}
+            >
+              <Text style={styles.topActionPrimaryText}>Criar pedidos teste</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.topActionBtn, styles.topActionDanger, managingTestOrders && styles.topActionDisabled]}
+              onPress={handleClearTestOrders}
+              disabled={managingTestOrders}
+            >
+              <Text style={styles.topActionDangerText}>Limpar pedidos teste</Text>
+            </Pressable>
+          </View>
         </View>
 
-        {/* Status tabs */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
-          {ALL_STATUSES.map((s) => (
-            <Pressable
-              key={s}
-              style={[styles.tabBtn, statusFilter === s && styles.tabBtnActive]}
-              onPress={() => setStatusFilter(s)}>
-              <Text style={[styles.tabBtnText, statusFilter === s && styles.tabBtnTextActive]}>
-                {s === 'all' ? 'Todos' : ORDER_STATUS_LABELS[s]} ({counts[s] ?? 0})
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Buscar por nome ou telefone..."
-          value={search}
-          onChangeText={setSearch}
-        />
+        <View style={styles.toolbarRow}>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Buscar por cliente, telefone, endereço, item ou ID..."
+            value={search}
+            onChangeText={setSearch}
+          />
+        </View>
 
         {loading ? (
           <View style={styles.centered}><ActivityIndicator color={BRAND} /></View>
         ) : (
-          <View style={styles.table}>
-            <View style={[styles.tableRow, styles.tableHeader]}>
-              {['#', 'Cliente', 'Total', 'Itens', 'Status', 'Data', ''].map((h) => (
-                <Text
-                  key={h}
-                  style={[
-                    styles.th,
-                    h === '#' && { flex: 0, width: 80 },
-                    h === 'Cliente' && { flex: 3 },
-                    h === '' && { flex: 0, width: 200 },
-                  ]}>
-                  {h}
-                </Text>
-              ))}
-            </View>
-            {filtered.map((order) => {
-              const next = nextStatus(order.status);
-              const isSelected = selected?.id === order.id;
+          <View style={styles.boardGrid}>
+            {BOARD_SECTIONS.map((section) => {
+              const list = ordersByStatus[section.key] ?? [];
               return (
-                <Pressable
-                  key={order.id}
-                  style={[styles.tableRow, isSelected && styles.rowSelected]}
-                  onPress={() => { setSelected(order); setShowNewForm(false); }}>
-                  <Text style={[styles.td, { flex: 0, width: 80, fontSize: 11, color: '#a08060' }]}
-                    numberOfLines={1}>
-                    #{order.id.slice(-6).toUpperCase()}
-                  </Text>
-                  <Text style={[styles.td, { flex: 3 }]} numberOfLines={1}>{order.customerName}</Text>
-                  <Text style={styles.td}>R$ {order.total.toFixed(2)}</Text>
-                  <Text style={styles.td}>{order.items.length} item(s)</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.statusBadge, { backgroundColor: ORDER_STATUS_COLORS[order.status] }]}>
-                      {ORDER_STATUS_LABELS[order.status]}
-                    </Text>
+                <View key={section.key} style={styles.sectionCard}>
+                  <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionTitle}>{section.title}</Text>
+                    <View style={styles.sectionBadge}>
+                      <Text style={styles.sectionBadgeText}>{list.length}</Text>
+                    </View>
                   </View>
-                  <Text style={[styles.td, { color: '#9e8a7a', fontSize: 12 }]} numberOfLines={1}>
-                    {formatDate(order)}
-                  </Text>
-                  <View style={[{ flex: 0, width: 200, flexDirection: 'row', gap: 6, alignItems: 'center' }]}>
-                    {next && order.status !== 'cancelado' ? (
-                      <Pressable
-                        style={styles.advanceBtn}
-                        onPress={() => handleStatusChange(order, next)}
-                        disabled={updatingStatus}>
-                        <Text style={styles.advanceBtnText}>
-                          → {ORDER_STATUS_LABELS[next]}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                    {order.status !== 'cancelado' && order.status !== 'entregue' ? (
-                      <Pressable style={styles.cancelBtn} onPress={() => handleCancel(order)}>
-                        <Text style={styles.cancelBtnText}>✕</Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-                </Pressable>
+
+                  {list.length === 0 ? (
+                    <View style={styles.sectionEmpty}>
+                      <Text style={styles.emptyText}>Nenhum pedido nesta etapa.</Text>
+                    </View>
+                  ) : (
+                    list.map((order) => {
+                      const nextStatus = getNextStatus(order.status);
+                      const delayed = isOrderDelayed(order);
+                      return (
+                        <Pressable
+                          key={order.id}
+                          style={[styles.orderCard, delayed && styles.orderCardDelayed]}
+                          onPress={() => setSelectedOrder(order)}
+                        >
+                          <View style={styles.orderCardHeader}>
+                            <Text style={styles.orderId}>#{order.id.slice(-6).toUpperCase()}</Text>
+                            <Text style={styles.orderTime}>{getElapsedLabel(order)}</Text>
+                          </View>
+
+                          <Text style={styles.orderCustomer} numberOfLines={1}>{order.customerName}</Text>
+                          <Text style={styles.orderMeta} numberOfLines={1}>
+                            {order.items.length} item(s) • R$ {order.total.toFixed(2)}
+                          </Text>
+                          <Text style={styles.orderMeta} numberOfLines={1}>
+                            {order.customerPhone || 'Sem telefone'}
+                          </Text>
+
+                          <View style={styles.orderFooterRow}>
+                            <Text style={[styles.statusBadge, { backgroundColor: ORDER_STATUS_COLORS[order.status] }]}>
+                              {LOCAL_STATUS_LABELS[order.status]}
+                            </Text>
+                            {delayed ? <Text style={styles.delayBadge}>Atrasado</Text> : null}
+                          </View>
+
+                          <View style={styles.orderActionsRow}>
+                            {nextStatus && order.status !== 'cancelado' ? (
+                              <Pressable
+                                style={styles.advanceBtn}
+                                onPress={() => handleStatusChange(order, nextStatus)}
+                                disabled={updatingStatus}
+                              >
+                                <Text style={styles.advanceBtnText}>
+                                  {order.status === 'novo' ? 'Aceitar pedido' : LOCAL_STATUS_LABELS[nextStatus]}
+                                </Text>
+                              </Pressable>
+                            ) : null}
+                            {order.status !== 'cancelado' && order.status !== 'entregue' ? (
+                              <Pressable
+                                style={styles.cancelInlineBtn}
+                                onPress={() => openCancelModal(order)}
+                                disabled={updatingStatus}
+                              >
+                                <Text style={styles.cancelInlineBtnText}>Cancelar</Text>
+                              </Pressable>
+                            ) : null}
+                          </View>
+                        </Pressable>
+                      );
+                    })
+                  )}
+                </View>
               );
             })}
-            {filtered.length === 0 && (
+            {filteredOrders.length === 0 ? (
               <View style={styles.emptyRow}>
-                <Text style={styles.emptyText}>Nenhum pedido encontrado.</Text>
+                <Text style={styles.emptyText}>Nenhum pedido encontrado para o filtro.</Text>
               </View>
-            )}
+            ) : null}
           </View>
         )}
       </ScrollView>
 
-      {/* Detail panel */}
-      {selected && !showNewForm && (
-        <View style={styles.sidePanel}>
-          <View style={styles.sidePanelHeader}>
-            <Text style={styles.sidePanelTitle}>Pedido #{selected.id.slice(-6).toUpperCase()}</Text>
-            <Pressable onPress={() => setSelected(null)}>
-              <Text style={styles.closeBtnText}>✕</Text>
-            </Pressable>
-          </View>
-          <ScrollView contentContainerStyle={styles.detailContent}>
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Cliente</Text>
-              <Text style={styles.detailText}>{selected.customerName}</Text>
-              {selected.customerPhone ? <Text style={styles.detailMeta}>📞 {selected.customerPhone}</Text> : null}
-              {selected.customerAddress ? <Text style={styles.detailMeta}>📍 {selected.customerAddress}</Text> : null}
-            </View>
-
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Itens</Text>
-              {selected.items.map((item, i) => (
-                <View key={i} style={styles.itemRow}>
-                  <Text style={styles.itemName} numberOfLines={1}>{item.qty}x {item.name}</Text>
-                  <Text style={styles.itemPrice}>R$ {(item.price * item.qty).toFixed(2)}</Text>
+      <Modal
+        visible={!!selectedOrder}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedOrder(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            {selectedOrder ? (
+              <>
+                <View style={styles.sidePanelHeader}>
+                  <Text style={styles.sidePanelTitle}>Pedido #{selectedOrder.id.slice(-6).toUpperCase()}</Text>
+                  <Pressable onPress={() => setSelectedOrder(null)}>
+                    <Text style={styles.closeBtnText}>✕</Text>
+                  </Pressable>
                 </View>
-              ))}
-              <View style={[styles.itemRow, styles.totalRow]}>
-                <Text style={styles.totalLabel}>Total</Text>
-                <Text style={styles.totalValue}>R$ {selected.total.toFixed(2)}</Text>
-              </View>
-            </View>
 
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Status</Text>
-              <View style={styles.statusFlow}>
-                {ORDER_STATUS_FLOW.map((s) => {
-                  const isActive = selected.status === s;
-                  const isDone = ORDER_STATUS_FLOW.indexOf(s) < ORDER_STATUS_FLOW.indexOf(selected.status as OrderStatus);
-                  return (
-                    <Pressable
-                      key={s}
-                      style={[
-                        styles.statusFlowBtn,
-                        isActive && { backgroundColor: ORDER_STATUS_COLORS[s], borderColor: ORDER_STATUS_COLORS[s] },
-                        isDone && styles.statusFlowDone,
-                      ]}
-                      onPress={() => handleStatusChange(selected, s)}
-                      disabled={updatingStatus || selected.status === 'cancelado'}>
-                      <Text
-                        style={[
-                          styles.statusFlowBtnText,
-                          (isActive || isDone) && { color: '#fff' },
-                        ]}>
-                        {ORDER_STATUS_LABELS[s]}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              {selected.status !== 'cancelado' && selected.status !== 'entregue' ? (
-                <Pressable style={styles.cancelOrderBtn} onPress={() => handleCancel(selected)}>
-                  <Text style={styles.cancelOrderBtnText}>Cancelar pedido</Text>
-                </Pressable>
-              ) : null}
-            </View>
+                <ScrollView contentContainerStyle={styles.detailContent}>
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>Cliente</Text>
+                    <Text style={styles.detailText}>{selectedOrder.customerName || '-'}</Text>
+                    <Text style={styles.detailMeta}>Telefone: {selectedOrder.customerPhone || '-'}</Text>
+                    <Text style={styles.detailMeta}>Endereço: {selectedOrder.customerAddress || '-'}</Text>
+                    <Text style={styles.detailMeta}>E-mail: {selectedOrder.customerEmail || '-'}</Text>
+                  </View>
 
-            {selected.notes ? (
-              <View style={styles.detailSection}>
-                <Text style={styles.detailSectionTitle}>Observações</Text>
-                <Text style={styles.detailText}>{selected.notes}</Text>
-              </View>
-            ) : null}
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>Pedido</Text>
+                    {selectedOrder.items.map((item, i) => (
+                      <View key={`${selectedOrder.id}-${i}`} style={styles.itemRow}>
+                        <Text style={styles.itemName} numberOfLines={1}>{item.qty}x {item.name}</Text>
+                        <Text style={styles.itemPrice}>R$ {(item.price * item.qty).toFixed(2)}</Text>
+                      </View>
+                    ))}
+                    <View style={[styles.itemRow, styles.totalRow]}>
+                      <Text style={styles.totalLabel}>Total</Text>
+                      <Text style={styles.totalValue}>R$ {selectedOrder.total.toFixed(2)}</Text>
+                    </View>
+                  </View>
 
-            <View style={styles.detailSection}>
-              <Text style={styles.detailMeta}>Criado: {formatDate(selected)}</Text>
-              {selected.updatedBy ? (
-                <Text style={styles.detailMeta}>Atualizado por: {selected.updatedBy}</Text>
-              ) : null}
-              {selected.origem ? (
-                <Text style={styles.detailMeta}>Origem: {selected.origem}</Text>
-              ) : null}
-            </View>
-          </ScrollView>
-        </View>
-      )}
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>Informações</Text>
+                    <Text style={styles.detailMeta}>Forma de pagamento: {getPaymentLabel(selectedOrder)}</Text>
+                    <Text style={styles.detailMeta}>Status: {LOCAL_STATUS_LABELS[selectedOrder.status]}</Text>
+                    <Text style={styles.detailMeta}>Criado em: {formatDateTime(selectedOrder)}</Text>
+                    <Text style={styles.detailMeta}>Origem: {selectedOrder.origem || '-'}</Text>
+                    {selectedOrder.updatedBy ? (
+                      <Text style={styles.detailMeta}>Atualizado por: {selectedOrder.updatedBy}</Text>
+                    ) : null}
+                    {selectedOrder.cancellationReason ? (
+                      <Text style={styles.detailMeta}>Motivo do cancelamento: {selectedOrder.cancellationReason}</Text>
+                    ) : null}
+                  </View>
 
-      {/* New order form panel */}
-      {showNewForm && (
-        <View style={styles.sidePanel}>
-          <View style={styles.sidePanelHeader}>
-            <Text style={styles.sidePanelTitle}>Novo pedido</Text>
-            <Pressable onPress={() => setShowNewForm(false)}>
-              <Text style={styles.closeBtnText}>✕</Text>
-            </Pressable>
-          </View>
-          <ScrollView contentContainerStyle={styles.detailContent}>
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Cliente</Text>
-              <TextInput style={styles.formInput} placeholder="Nome *" value={newName} onChangeText={setNewName} />
-              <TextInput style={styles.formInput} placeholder="Telefone" value={newPhone} onChangeText={setNewPhone} keyboardType="phone-pad" />
-              <TextInput style={styles.formInput} placeholder="Endereço" value={newAddress} onChangeText={setNewAddress} />
-            </View>
-
-            <View style={styles.detailSection}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <Text style={styles.detailSectionTitle}>Itens</Text>
-                <Pressable onPress={addItemRow}>
-                  <Text style={{ color: BRAND, fontWeight: '700', fontSize: 13 }}>+ Adicionar</Text>
-                </Pressable>
-              </View>
-              {newItems.map((item, i) => (
-                <View key={i} style={styles.newItemRow}>
-                  <TextInput
-                    style={[styles.formInput, { flex: 3 }]}
-                    placeholder="Nome do item"
-                    value={item.name}
-                    onChangeText={(t) => updateItemRow(i, 'name', t)}
-                  />
-                  <TextInput
-                    style={[styles.formInput, { flex: 1 }]}
-                    placeholder="Preço"
-                    value={item.price}
-                    onChangeText={(t) => updateItemRow(i, 'price', t)}
-                    keyboardType="decimal-pad"
-                  />
-                  <TextInput
-                    style={[styles.formInput, { width: 56 }]}
-                    placeholder="Qtd"
-                    value={item.qty}
-                    onChangeText={(t) => updateItemRow(i, 'qty', t)}
-                    keyboardType="number-pad"
-                  />
-                  {newItems.length > 1 ? (
-                    <Pressable onPress={() => removeItemRow(i)} style={styles.removeItemBtn}>
-                      <Text style={styles.removeItemBtnText}>✕</Text>
-                    </Pressable>
+                  {selectedOrder.notes ? (
+                    <View style={styles.detailSection}>
+                      <Text style={styles.detailSectionTitle}>Observações</Text>
+                      <Text style={styles.detailText}>{selectedOrder.notes}</Text>
+                    </View>
                   ) : null}
-                </View>
-              ))}
-            </View>
 
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Observações</Text>
-              <TextInput
-                style={[styles.formInput, { minHeight: 80 }]}
-                placeholder="Observações do pedido (opcional)"
-                value={newNotes}
-                onChangeText={setNewNotes}
-                multiline
-              />
-            </View>
-
-            <Pressable style={[styles.primaryBtn, { marginTop: 8 }]} onPress={handleCreateOrder} disabled={saving}>
-              <Text style={styles.primaryBtnText}>{saving ? 'Criando...' : 'Criar pedido'}</Text>
-            </Pressable>
-          </ScrollView>
+                  <View style={styles.detailSection}>
+                    <Text style={styles.detailSectionTitle}>Ações</Text>
+                    <View style={styles.statusFlow}>
+                      {ORDER_STATUS_FLOW.map((status) => {
+                        const isCurrent = selectedOrder.status === status;
+                        const isDisabled = updatingStatus || selectedOrder.status === 'cancelado' || isCurrent;
+                        return (
+                          <Pressable
+                            key={status}
+                            style={[
+                              styles.statusFlowBtn,
+                              isCurrent && { backgroundColor: ORDER_STATUS_COLORS[status], borderColor: ORDER_STATUS_COLORS[status] },
+                              isDisabled && !isCurrent && styles.statusFlowBtnDisabled,
+                            ]}
+                            onPress={() => handleStatusChange(selectedOrder, status)}
+                            disabled={isDisabled}
+                          >
+                            <Text style={[styles.statusFlowBtnText, isCurrent && { color: '#fff' }]}>
+                              {LOCAL_STATUS_LABELS[status]}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    {selectedOrder.status !== 'cancelado' && selectedOrder.status !== 'entregue' ? (
+                      <Pressable style={styles.cancelOrderBtn} onPress={() => openCancelModal(selectedOrder)}>
+                        <Text style={styles.cancelOrderBtnText}>Cancelar pedido</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </ScrollView>
+              </>
+            ) : null}
+          </View>
         </View>
-      )}
+      </Modal>
+
+      <Modal
+        visible={!!cancelModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCancelModal(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.cancelCard}>
+            <Text style={styles.cancelTitle}>Cancelar pedido</Text>
+            <Text style={styles.cancelSubTitle}>
+              Informe o motivo do cancelamento para o pedido
+              {cancelModal ? ` #${cancelModal.order.id.slice(-6).toUpperCase()}` : ''}.
+            </Text>
+            <TextInput
+              style={styles.cancelReasonInput}
+              value={cancelModal?.reason ?? ''}
+              onChangeText={(text) => setCancelModal((prev) => (prev ? { ...prev, reason: text } : prev))}
+              placeholder="Motivo do cancelamento"
+              multiline
+            />
+            <View style={styles.cancelActions}>
+              <Pressable style={styles.cancelModalGhostBtn} onPress={() => setCancelModal(null)}>
+                <Text style={styles.cancelModalGhostText}>Voltar</Text>
+              </Pressable>
+              <Pressable style={styles.cancelModalPrimaryBtn} onPress={handleCancelWithReason}>
+                <Text style={styles.cancelModalPrimaryText}>Confirmar cancelamento</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: 'row' },
+  root: { flex: 1 },
   content: { padding: 32, paddingBottom: 60, gap: 16 },
   centered: { padding: 32, alignItems: 'center' },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   pageTitle: { fontSize: 26, fontWeight: '800', color: '#2c1b12' },
   pageSubtitle: { fontSize: 13, color: '#6e5a4b' },
-  tabRow: { gap: 8 },
-  tabBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#d9cfc2', backgroundColor: '#fff' },
-  tabBtnActive: { backgroundColor: '#2c1b12', borderColor: '#2c1b12' },
-  tabBtnText: { fontSize: 13, color: '#6e5a4b', fontWeight: '600' },
-  tabBtnTextActive: { color: '#fff' },
-  searchInput: {
-    borderWidth: 1, borderColor: '#d9cfc2', borderRadius: 10,
-    paddingHorizontal: 14, paddingVertical: 10, backgroundColor: '#fff', fontSize: 14,
+  topActionsRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' },
+  topActionBtn: {
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  primaryBtn: { backgroundColor: BRAND, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 20, alignItems: 'center' },
-  primaryBtnText: { color: '#fff', fontWeight: '800', fontSize: 14 },
-  table: { backgroundColor: '#fff', borderRadius: 12, borderWidth: 1, borderColor: '#e8ddd4', overflow: 'hidden' },
-  tableHeader: { backgroundColor: '#f8f4f0' },
-  tableRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f0e8e0', gap: 8 },
-  rowSelected: { backgroundColor: '#fdf6f0' },
-  th: { flex: 1, fontWeight: '700', color: '#3c2b1e', fontSize: 12 },
-  td: { flex: 1, fontSize: 14, color: '#2c1b12' },
-  statusBadge: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, color: '#fff', fontWeight: '700', fontSize: 12, overflow: 'hidden' },
-  advanceBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: '#2c1b12' },
-  advanceBtnText: { color: '#fff', fontWeight: '700', fontSize: 11 },
-  cancelBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: '#fde2e2' },
-  cancelBtnText: { color: BRAND, fontWeight: '700', fontSize: 12 },
+  topActionPrimary: {
+    backgroundColor: '#2c1b12',
+    borderColor: '#2c1b12',
+  },
+  topActionDanger: {
+    backgroundColor: '#fff',
+    borderColor: '#e1bcbc',
+  },
+  topActionPrimaryText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  topActionDangerText: { color: '#9f2d2d', fontSize: 12, fontWeight: '800' },
+  topActionDisabled: { opacity: 0.6 },
+  toolbarRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  searchInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#d9cfc2',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: '#fff',
+    fontSize: 14,
+  },
+
+  boardGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    alignItems: 'flex-start',
+  },
+  sectionCard: {
+    flexBasis: 360,
+    flexGrow: 1,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e8ddd4',
+    padding: 12,
+    gap: 10,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 4,
+  },
+  sectionTitle: { fontSize: 14, fontWeight: '800', color: '#2c1b12' },
+  sectionBadge: {
+    minWidth: 24,
+    borderRadius: 999,
+    backgroundColor: '#2c1b12',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    alignItems: 'center',
+  },
+  sectionBadgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  sectionEmpty: {
+    minHeight: 80,
+    borderRadius: 10,
+    backgroundColor: '#f8f4f0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+  },
+
+  orderCard: {
+    borderWidth: 1,
+    borderColor: '#eadfd6',
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: '#fffdfa',
+    gap: 5,
+  },
+  orderCardDelayed: {
+    borderColor: '#e16c6c',
+    backgroundColor: '#fff4f4',
+  },
+  orderCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  orderId: { fontSize: 12, color: '#8f7766', fontWeight: '700' },
+  orderTime: { fontSize: 12, color: '#8f7766' },
+  orderCustomer: { fontSize: 16, color: '#2c1b12', fontWeight: '800' },
+  orderMeta: { fontSize: 12, color: '#5f4b3c' },
+  orderFooterRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  statusBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+    overflow: 'hidden',
+  },
+  delayBadge: {
+    fontSize: 11,
+    color: '#9f2d2d',
+    fontWeight: '800',
+  },
+  orderActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  advanceBtn: {
+    flex: 1,
+    borderRadius: 8,
+    backgroundColor: '#2c1b12',
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  advanceBtnText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  cancelInlineBtn: {
+    borderRadius: 8,
+    backgroundColor: '#fde2e2',
+    borderWidth: 1,
+    borderColor: '#f6c8c8',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  cancelInlineBtnText: { color: '#9f2d2d', fontWeight: '700', fontSize: 12 },
+
   emptyRow: { padding: 24, alignItems: 'center' },
   emptyText: { color: '#6e5a4b' },
-  // Side panel
-  sidePanel: { width: 380, backgroundColor: '#fff', borderLeftWidth: 1, borderLeftColor: '#e8ddd4' },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(28, 20, 14, 0.48)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 20,
+  },
+  modalCard: {
+    width: '92%',
+    maxWidth: 760,
+    maxHeight: '92%',
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e8ddd4',
+    overflow: 'hidden',
+  },
   sidePanelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#e8ddd4' },
   sidePanelTitle: { fontSize: 17, fontWeight: '800', color: '#2c1b12' },
   closeBtnText: { fontSize: 18, color: '#6e5a4b', fontWeight: '700' },
@@ -524,12 +820,48 @@ const styles = StyleSheet.create({
   totalValue: { fontSize: 16, fontWeight: '800', color: BRAND },
   statusFlow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
   statusFlowBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#d9cfc2', backgroundColor: '#fff' },
-  statusFlowDone: { backgroundColor: '#9e8a7a', borderColor: '#9e8a7a' },
+  statusFlowBtnDisabled: { opacity: 0.45 },
   statusFlowBtnText: { fontSize: 12, fontWeight: '700', color: '#6e5a4b' },
   cancelOrderBtn: { borderWidth: 1, borderColor: BRAND, borderRadius: 8, paddingVertical: 8, alignItems: 'center', marginTop: 4 },
   cancelOrderBtnText: { color: BRAND, fontWeight: '700', fontSize: 13 },
-  formInput: { borderWidth: 1, borderColor: '#d9cfc2', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, backgroundColor: '#fdfaf6', marginBottom: 8 },
-  newItemRow: { flexDirection: 'row', gap: 8, marginBottom: 8, alignItems: 'center' },
-  removeItemBtn: { paddingHorizontal: 8, paddingVertical: 8, backgroundColor: '#fde2e2', borderRadius: 6 },
-  removeItemBtnText: { color: BRAND, fontWeight: '700', fontSize: 12 },
+
+  cancelCard: {
+    width: '92%',
+    maxWidth: 560,
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e8ddd4',
+    padding: 20,
+    gap: 12,
+  },
+  cancelTitle: { fontSize: 20, fontWeight: '800', color: '#2c1b12' },
+  cancelSubTitle: { fontSize: 13, color: '#6e5a4b' },
+  cancelReasonInput: {
+    borderWidth: 1,
+    borderColor: '#d9cfc2',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    backgroundColor: '#fdfaf6',
+    minHeight: 92,
+    textAlignVertical: 'top',
+  },
+  cancelActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 2 },
+  cancelModalGhostBtn: {
+    borderWidth: 1,
+    borderColor: '#d9cfc2',
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  cancelModalGhostText: { color: '#6e5a4b', fontWeight: '700', fontSize: 13 },
+  cancelModalPrimaryBtn: {
+    backgroundColor: BRAND,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  cancelModalPrimaryText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 });

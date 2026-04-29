@@ -54,6 +54,10 @@ export default function ProfileScreen() {
     return isAdminEmail(user?.email);
   }, [user]);
 
+  const getErrorMessage = (error: unknown, fallback: string) => {
+    return error instanceof Error ? error.message : fallback;
+  };
+
   const formatCpfValue = (value: string) => {
     const digits = value.replace(/\D/g, "");
     const part1 = digits.slice(0, 3);
@@ -198,8 +202,8 @@ export default function ProfileScreen() {
         router.replace("/adminConfigs/estoque");
       }
       resetFormFields();
-    } catch (err: any) {
-      Alert.alert("Erro", err?.message ?? "Não foi possível concluir a ação.");
+    } catch (err: unknown) {
+      Alert.alert("Erro", getErrorMessage(err, "Não foi possível concluir a ação."));
     } finally {
       setLoading(false);
     }
@@ -213,8 +217,8 @@ export default function ProfileScreen() {
       setMessage("Sessão encerrada");
       resetFormFields();
       router.replace("/");
-    } catch (err: any) {
-      Alert.alert("Erro", err?.message ?? "Não foi possível sair.");
+    } catch (err: unknown) {
+      Alert.alert("Erro", getErrorMessage(err, "Não foi possível sair."));
     }
   };
 

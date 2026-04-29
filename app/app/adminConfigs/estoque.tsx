@@ -58,6 +58,10 @@ type PendingUpload = {
   mimeType?: string | null;
 };
 
+const getErrorMessage = (error: unknown, fallback: string) => {
+  return error instanceof Error ? error.message : fallback;
+};
+
 type ImageMode = 'database' | 'upload';
 
 export default function EstoqueScreen() {
@@ -474,9 +478,9 @@ export default function EstoqueScreen() {
 
       setPendingUpload(null);
       resetForm();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Erro ao salvar produto', err);
-      Alert.alert('Erro', err?.message ?? 'Não foi possível salvar.');
+      Alert.alert('Erro', getErrorMessage(err, 'Não foi possível salvar.'));
     } finally {
       setUploadingImage(false);
       setSaving(false);

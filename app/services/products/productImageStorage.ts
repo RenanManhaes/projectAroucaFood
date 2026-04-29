@@ -76,9 +76,10 @@ export async function uploadProductImage(file: ProductImageUpload, productId?: s
 
     const downloadURL = await getDownloadURL(storageRef);
     return { downloadURL, storagePath };
-  } catch (err: any) {
-    const serverResponse = err?.serverResponse ? ` | server: ${err.serverResponse}` : '';
-    throw new Error(`Falha ao enviar imagem para o Storage (${err?.code ?? 'sem-codigo'})${serverResponse}`);
+  } catch (err: unknown) {
+    const parsed = err as { serverResponse?: string; code?: string };
+    const serverResponse = parsed?.serverResponse ? ` | server: ${parsed.serverResponse}` : '';
+    throw new Error(`Falha ao enviar imagem para o Storage (${parsed?.code ?? 'sem-codigo'})${serverResponse}`);
   }
 }
 

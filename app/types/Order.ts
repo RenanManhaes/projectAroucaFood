@@ -27,6 +27,8 @@ export type Order = {
   status: OrderStatus;
   origem?: 'app' | 'web' | 'manual' | null;
   notes?: string | null;
+  paymentMethod?: string | null;
+  cancellationReason?: string | null;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
   updatedBy?: string | null;

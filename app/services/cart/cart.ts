@@ -157,7 +157,7 @@ export async function addOrIncrementItem(product: Product, quantity = 1): Promis
       name: product.name,
       price: product.price,
       qty: clampQtyByStock(quantity, productStock),
-      category: (product as any)?.category ?? null,
+      category: product.category ?? null,
       image: product.image ?? null,
       stock: productStock,
     });
