@@ -9,8 +9,17 @@ type UserRow = {
   name: string;
   email: string;
   phone: string;
+  cartItemsCount: number;
+  cartUpdatedAtMs: number | null;
   role: 'admin' | 'usuario';
   createdAtLabel: string;
+};
+
+type UserFilterMode = 'all' | 'callback' | 'admin' | 'usuario';
+
+type CallbackSignal = {
+  count: number;
+  updatedAtMs: number | null;
 };
 
 const normalizeOptionalString = (value: unknown) => {
@@ -39,16 +48,74 @@ const formatDate = (value: unknown) => {
   });
 };
 
+const getTimestampMs = (value: unknown) => {
+  if (!value) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof (value as { toMillis?: unknown }).toMillis === 'function') {
+    try {
+      return (value as { toMillis: () => number }).toMillis();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const normalizePhoneDigits = (value: string) => value.replace(/\D/g, '');
+
+
 export default function UsuariosWebScreen() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
   const [actionMessage, setActionMessage] = useState('');
   const [search, setSearch] = useState('');
+  const [filterMode, setFilterMode] = useState<UserFilterMode>('all');
   const [editingUserId, setEditingUserId] = useState('');
   const [editingName, setEditingName] = useState('');
   const [savingUserId, setSavingUserId] = useState('');
   const [deletingUserId, setDeletingUserId] = useState('');
+  const [callbackByUserId, setCallbackByUserId] = useState<Record<string, CallbackSignal>>({});
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'carts'),
+      (snap) => {
+        const now = Date.now();
+        const next: Record<string, CallbackSignal> = {};
+
+        snap.docs.forEach((docSnap) => {
+          const data = docSnap.data();
+          const expiresAtMs = getTimestampMs(data?.expiresAt);
+          if (typeof expiresAtMs === 'number' && expiresAtMs > 0 && expiresAtMs < now) {
+            return;
+          }
+
+          const items = Array.isArray(data?.items) ? data.items : [];
+          const qtyCount = items.reduce((sum, item) => {
+            const qty = Number((item as { qty?: unknown })?.qty) || 0;
+            return sum + Math.max(0, qty);
+          }, 0);
+          const updatedAtMs = getTimestampMs(data?.updatedAt);
+
+          if (qtyCount > 0) {
+            next[docSnap.id] = {
+              count: qtyCount,
+              updatedAtMs,
+            };
+          }
+        });
+
+        setCallbackByUserId(next);
+      },
+      () => {
+        setCallbackByUserId({});
+      }
+    );
+
+    return unsub;
+  }, []);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'users'), (snap) => {
@@ -60,12 +127,16 @@ export default function UsuariosWebScreen() {
         const email = normalizeOptionalString(data?.email).toLowerCase();
         const name = normalizeOptionalString(data?.name);
         const phone = normalizeOptionalString(data?.phone);
+        const role = isAdminEmail(email) ? 'admin' : 'usuario';
+        const cartSignal = callbackByUserId[docSnap.id];
         const row: UserRow = {
           id: docSnap.id,
           name: name || '-',
           email: email || '-',
           phone: phone || '-',
-          role: isAdminEmail(email) ? 'admin' : 'usuario',
+          cartItemsCount: role === 'admin' ? 0 : cartSignal?.count ?? 0,
+          cartUpdatedAtMs: role === 'admin' ? null : cartSignal?.updatedAtMs ?? null,
+          role,
           createdAtLabel: formatDate(data?.createdAt),
         };
 
@@ -90,26 +161,74 @@ export default function UsuariosWebScreen() {
     });
 
     return unsub;
-  }, []);
+  }, [callbackByUserId]);
 
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return users;
+    let list = users;
 
-    return users.filter((user) => {
+    if (filterMode === 'callback') {
+      list = list.filter((user) => user.role === 'usuario' && user.cartItemsCount > 0);
+      list = [...list].sort((a, b) => {
+        const left = typeof a.cartUpdatedAtMs === 'number' ? a.cartUpdatedAtMs : Number.MAX_SAFE_INTEGER;
+        const right = typeof b.cartUpdatedAtMs === 'number' ? b.cartUpdatedAtMs : Number.MAX_SAFE_INTEGER;
+        if (left !== right) return left - right;
+        return b.cartItemsCount - a.cartItemsCount;
+      });
+    } else if (filterMode === 'admin') {
+      list = list.filter((user) => user.role === 'admin');
+    } else if (filterMode === 'usuario') {
+      list = list.filter((user) => user.role === 'usuario');
+    }
+
+    if (!q) return list;
+
+    return list.filter((user) => {
       return (
         user.name.toLowerCase().includes(q) ||
         user.email.toLowerCase().includes(q) ||
         user.phone.toLowerCase().includes(q)
       );
     });
-  }, [users, search]);
+  }, [users, search, filterMode]);
+
+  const copyText = async (text: string) => {
+    try {
+      if (!text) {
+        setActionMessage('Contato vazio para copiar.');
+        return;
+      }
+
+      const nav = (globalThis as { navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } } }).navigator;
+      if (nav?.clipboard?.writeText) {
+        await nav.clipboard.writeText(text);
+        setActionMessage(`Copiado: ${text}`);
+        return;
+      }
+
+      setActionMessage(`Copie manualmente: ${text}`);
+    } catch {
+      setActionMessage('Não foi possível copiar automaticamente.');
+    }
+  };
+
+  const handleCopyPhone = async (user: UserRow) => {
+    const raw = normalizeOptionalString(user.phone);
+    const digits = normalizePhoneDigits(raw);
+    if (!digits) {
+      setActionMessage('Usuário sem telefone para copiar.');
+      return;
+    }
+    await copyText(digits);
+  };
 
   const totals = useMemo(() => {
     const admins = users.filter((u) => u.role === 'admin').length;
+    const callbacks = users.filter((u) => u.role === 'usuario' && u.cartItemsCount > 0).length;
     return {
       all: users.length,
       admins,
+      callbacks,
       regular: users.length - admins,
     };
   }, [users]);
@@ -160,7 +279,8 @@ export default function UsuariosWebScreen() {
       setActionMessage('');
       try {
         await deleteDoc(doc(db, 'users', user.id));
-        setActionMessage('Perfil excluído com sucesso.');
+        await deleteDoc(doc(db, 'carts', user.id));
+        setActionMessage('Perfil excluído com sucesso no Firestore.');
       } catch (error: unknown) {
         setActionMessage(getErrorMessage(error, 'Não foi possível excluir o perfil.'));
       } finally {
@@ -191,18 +311,34 @@ export default function UsuariosWebScreen() {
       {actionMessage ? <Text style={styles.infoText}>{actionMessage}</Text> : null}
 
       <View style={styles.statsRow}>
-        <View style={styles.statCard}>
+        <Pressable
+          style={[styles.statCard, filterMode === 'all' && styles.statCardActive]}
+          onPress={() => setFilterMode('all')}
+        >
           <Text style={styles.statValue}>{totals.all}</Text>
           <Text style={styles.statLabel}>Total</Text>
-        </View>
-        <View style={styles.statCard}>
+        </Pressable>
+        <Pressable
+          style={[styles.statCard, filterMode === 'admin' && styles.statCardActive]}
+          onPress={() => setFilterMode('admin')}
+        >
           <Text style={styles.statValue}>{totals.admins}</Text>
           <Text style={styles.statLabel}>Admins</Text>
-        </View>
-        <View style={styles.statCard}>
+        </Pressable>
+        <Pressable
+          style={[styles.statCard, filterMode === 'callback' && styles.statCardActive]}
+          onPress={() => setFilterMode('callback')}
+        >
+          <Text style={styles.statValue}>{totals.callbacks}</Text>
+          <Text style={styles.statLabel}>Callback</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.statCard, filterMode === 'usuario' && styles.statCardActive]}
+          onPress={() => setFilterMode('usuario')}
+        >
           <Text style={styles.statValue}>{totals.regular}</Text>
           <Text style={styles.statLabel}>Usuários</Text>
-        </View>
+        </Pressable>
       </View>
 
       <TextInput
@@ -222,9 +358,10 @@ export default function UsuariosWebScreen() {
             <Text style={[styles.headerCell, { flex: 2 }]}>Nome</Text>
             <Text style={[styles.headerCell, { flex: 2 }]}>E-mail</Text>
             <Text style={[styles.headerCell, { flex: 1 }]}>Telefone</Text>
+            <Text style={[styles.headerCell, { flex: 0.8 }]}>Carrinho</Text>
             <Text style={[styles.headerCell, { flex: 1 }]}>Perfil</Text>
             <Text style={[styles.headerCell, { flex: 1 }]}>Cadastro</Text>
-            <Text style={[styles.headerCell, { flex: 1.4 }]}>Ações</Text>
+            <Text style={[styles.headerCell, { flex: 1.8 }]}>Ações</Text>
           </View>
 
           {filteredUsers.map((user) => (
@@ -242,13 +379,18 @@ export default function UsuariosWebScreen() {
               )}
               <Text style={[styles.cell, { flex: 2 }]} numberOfLines={1}>{user.email}</Text>
               <Text style={[styles.cell, { flex: 1 }]} numberOfLines={1}>{user.phone}</Text>
+              <View style={{ flex: 0.8 }}>
+                <Text style={[styles.cartBadge, user.cartItemsCount > 0 ? styles.cartBadgeActive : styles.cartBadgeEmpty]}>
+                  {user.cartItemsCount}
+                </Text>
+              </View>
               <View style={{ flex: 1 }}>
                 <Text style={[styles.roleBadge, user.role === 'admin' ? styles.adminBadge : styles.userBadge]}>
                   {user.role === 'admin' ? 'Admin' : 'Usuário'}
                 </Text>
               </View>
               <Text style={[styles.cell, { flex: 1, color: '#8f7a6a' }]}>{user.createdAtLabel}</Text>
-              <View style={[styles.actionsCell, { flex: 1.4 }]}>
+              <View style={[styles.actionsCell, { flex: 1.8 }]}>
                 {editingUserId === user.id ? (
                   <>
                     <Pressable
@@ -264,6 +406,18 @@ export default function UsuariosWebScreen() {
                   </>
                 ) : (
                   <>
+                    {user.cartItemsCount > 0 ? (
+                      <>
+                        <Pressable
+                          style={[styles.actionBtn, styles.contactBtn]}
+                          onPress={() => {
+                            void handleCopyPhone(user);
+                          }}
+                        >
+                          <Text style={styles.actionBtnText}>Copiar tel</Text>
+                        </Pressable>
+                      </>
+                    ) : null}
                     <Pressable
                       style={[styles.actionBtn, styles.editBtn]}
                       onPress={() => startEdit(user)}
@@ -320,6 +474,10 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 18,
     minWidth: 120,
+  },
+  statCardActive: {
+    borderColor: '#c3865c',
+    backgroundColor: '#fff7ef',
   },
   statValue: { fontSize: 28, fontWeight: '800', color: '#2c1b12' },
   statLabel: { fontSize: 12, color: '#6e5a4b', fontWeight: '700' },
@@ -387,6 +545,7 @@ const styles = StyleSheet.create({
     borderColor: '#d8ccbf',
   },
   deleteBtn: { backgroundColor: '#9f2d2d' },
+  contactBtn: { backgroundColor: '#2b6f6b' },
   actionBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   cancelBtnText: { color: '#5c4534', fontSize: 12, fontWeight: '800' },
   roleBadge: {
@@ -403,6 +562,23 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   userBadge: {
+    backgroundColor: '#e6d7cb',
+    color: '#5c4534',
+  },
+  cartBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    fontSize: 12,
+    fontWeight: '800',
+    overflow: 'hidden',
+  },
+  cartBadgeActive: {
+    backgroundColor: '#fef2d7',
+    color: '#8a4b10',
+  },
+  cartBadgeEmpty: {
     backgroundColor: '#e6d7cb',
     color: '#5c4534',
   },

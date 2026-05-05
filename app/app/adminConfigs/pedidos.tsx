@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,27 +10,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
-  addDoc,
   collection,
   doc,
-  getDocs,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   updateDoc,
-  writeBatch,
 } from 'firebase/firestore';
+
 import { auth, db } from '@/config/firebase';
-import type { Order, OrderStatus } from '@/types/Order';
-import {
-  isActiveOrderStatus,
-  ORDER_STATUS_COLORS,
-  ORDER_STATUS_FLOW,
-  ORDER_STATUS_LABELS,
-} from '@/types/Order';
 import { BRAND_PRIMARY } from '@/constants/ui/colors';
+import type { Order, OrderStatus } from '@/types/Order';
+import { ORDER_STATUS_COLORS, ORDER_STATUS_FLOW, ORDER_STATUS_LABELS } from '@/types/Order';
 import { generateOrderCode, getOrderDisplayCode } from '@/utils/orderCode';
 import { updateOrderStatusWithLock } from '@/services/orders/orderLifecycle';
 
@@ -40,7 +33,7 @@ const BRAND = BRAND_PRIMARY;
 const BOARD_SECTIONS: { key: OrderStatus; title: string }[] = [
   { key: 'novo', title: 'Aguardando aceite' },
   { key: 'em_preparo', title: 'Em preparo' },
-  { key: 'pronto', title: 'Pronto para coleta/entrega' },
+  { key: 'pronto', title: 'Pronto' },
   { key: 'em_rota', title: 'Em rota' },
   { key: 'cancelado', title: 'Cancelados' },
   { key: 'entregue', title: 'Concluídos' },
@@ -51,6 +44,8 @@ type CancelModalState = {
   reason: string;
 };
 
+type OrdersFilter = 'all' | OrderStatus;
+
 const LOCAL_STATUS_LABELS: Record<OrderStatus, string> = {
   ...ORDER_STATUS_LABELS,
   novo: 'Aguardando aceite',
@@ -60,33 +55,6 @@ const LOCAL_STATUS_LABELS: Record<OrderStatus, string> = {
 
 const normalizeOptionalString = (value: unknown) => {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
-};
-
-const confirmAction = async (title: string, message: string, confirmText = 'Confirmar') => {
-  if (Platform.OS === 'web') {
-    return globalThis.confirm?.(`${title}\n\n${message}`) ?? false;
-  }
-
-  return new Promise<boolean>((resolve) => {
-    Alert.alert(
-      title,
-      message,
-      [
-        { text: 'Cancelar', style: 'cancel', onPress: () => resolve(false) },
-        { text: confirmText, onPress: () => resolve(true) },
-      ],
-      { cancelable: true, onDismiss: () => resolve(false) }
-    );
-  });
-};
-
-const getPaymentLabel = (order: Order) => {
-  const value =
-    order.paymentMethod ??
-    null;
-
-  if (!value || typeof value !== 'string') return '-';
-  return value;
 };
 
 const formatDateTime = (order: Order) => {
@@ -126,14 +94,14 @@ const isOrderDelayed = (order: Order) => {
   return false;
 };
 
-export default function PedidosWebScreen() {
+export default function PedidosMobileScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [activeFilter, setActiveFilter] = useState<OrdersFilter>('all');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [cancelModal, setCancelModal] = useState<CancelModalState | null>(null);
-  const [managingTestOrders, setManagingTestOrders] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'pedidos'), orderBy('createdAt', 'desc'));
@@ -147,9 +115,9 @@ export default function PedidosWebScreen() {
             void updateDoc(doc(db, 'pedidos', d.id), {
               orderCode: generateOrderCode(),
               updatedAt: serverTimestamp(),
-              updatedBy: auth.currentUser?.email ?? 'admin-web',
+              updatedBy: auth.currentUser?.email ?? 'admin-mobile',
             }).catch(() => {
-              // Ignore backfill failures to avoid breaking the list rendering.
+              // Ignore backfill failures to keep list responsive.
             });
           }
 
@@ -198,10 +166,11 @@ export default function PedidosWebScreen() {
         setLoading(false);
       }
     );
+
     return unsub;
   }, []);
 
-  const filteredOrders = useMemo(() => {
+  const searchedOrders = useMemo(() => {
     let list = [...orders];
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -217,6 +186,23 @@ export default function PedidosWebScreen() {
     return list;
   }, [orders, search]);
 
+  const filteredOrders = useMemo(() => {
+    if (activeFilter === 'all') return searchedOrders;
+    return searchedOrders.filter((order) => order.status === activeFilter);
+  }, [activeFilter, searchedOrders]);
+
+  const filterCounts = useMemo(() => {
+    return {
+      all: searchedOrders.length,
+      novo: searchedOrders.filter((order) => order.status === 'novo').length,
+      em_preparo: searchedOrders.filter((order) => order.status === 'em_preparo').length,
+      pronto: searchedOrders.filter((order) => order.status === 'pronto').length,
+      em_rota: searchedOrders.filter((order) => order.status === 'em_rota').length,
+      entregue: searchedOrders.filter((order) => order.status === 'entregue').length,
+      cancelado: searchedOrders.filter((order) => order.status === 'cancelado').length,
+    };
+  }, [searchedOrders]);
+
   const ordersByStatus = useMemo(() => {
     const grouped: Record<OrderStatus, Order[]> = {
       novo: [],
@@ -226,6 +212,7 @@ export default function PedidosWebScreen() {
       entregue: [],
       cancelado: [],
     };
+
     filteredOrders.forEach((order) => grouped[order.status].push(order));
     return grouped;
   }, [filteredOrders]);
@@ -233,6 +220,19 @@ export default function PedidosWebScreen() {
   const delayedTotal = useMemo(() => {
     return filteredOrders.filter((order) => isOrderDelayed(order)).length;
   }, [filteredOrders]);
+
+  const visibleSections = useMemo(() => {
+    if (activeFilter === 'all') {
+      return BOARD_SECTIONS;
+    }
+    return BOARD_SECTIONS.filter((section) => section.key === activeFilter);
+  }, [activeFilter]);
+
+  const getNextStatus = (current: OrderStatus): OrderStatus | null => {
+    const idx = ORDER_STATUS_FLOW.indexOf(current);
+    if (idx === -1 || idx === ORDER_STATUS_FLOW.length - 1) return null;
+    return ORDER_STATUS_FLOW[idx + 1];
+  };
 
   const handleStatusChange = async (order: Order, newStatus: OrderStatus) => {
     if (order.status === newStatus) return;
@@ -283,221 +283,102 @@ export default function PedidosWebScreen() {
     }
   };
 
-  const getNextStatus = (current: OrderStatus): OrderStatus | null => {
-    const idx = ORDER_STATUS_FLOW.indexOf(current);
-    if (idx === -1 || idx === ORDER_STATUS_FLOW.length - 1) return null;
-    return ORDER_STATUS_FLOW[idx + 1];
-  };
-
-  const isTestOrder = (order: Partial<Order>) => {
-    const name = String(order.customerName ?? '').toLowerCase();
-    const notes = String(order.notes ?? '').toLowerCase();
-    const email = String(order.customerEmail ?? '').toLowerCase();
-    return (
-      name.startsWith('teste ') ||
-      name.startsWith('cliente teste') ||
-      notes.includes('pedido teste') ||
-      email === 'cliente.teste@exemplo.com'
-    );
-  };
-
-  const handleCreateTestOrders = async () => {
-    const confirmed = await confirmAction(
-      'Criar pedidos teste',
-      'Deseja criar pedidos de teste na base?',
-      'Criar'
-    );
-    if (!confirmed) return;
-
-    setManagingTestOrders(true);
-    try {
-      const basePayload = {
-        customerEmail: 'cliente.teste@exemplo.com',
-        customerPhone: '(11) 98888-0000',
-        customerAddress: 'Rua Teste Fluxo, 456',
-        origem: 'manual' as const,
-        paymentMethod: 'pix',
-        updatedBy: auth.currentUser?.email ?? 'admin-web',
-      };
-
-      const testOrders = [
-        {
-          customerName: 'Teste Novo',
-          customerId: 'teste-web',
-          status: 'novo' as OrderStatus,
-          notes: 'Pedido teste - aguardando aceite',
-          items: [
-            { name: 'Contra File 500g', price: 54.9, qty: 1 },
-            { name: 'Carvao 3kg', price: 19.9, qty: 1 },
-          ],
-          total: 74.8,
-        },
-        {
-          customerName: 'Teste Preparo',
-          customerId: 'teste-web',
-          status: 'em_preparo' as OrderStatus,
-          notes: 'Pedido teste - em preparo',
-          items: [{ name: 'Picanha 700g', price: 89.9, qty: 1 }],
-          total: 89.9,
-        },
-        {
-          customerName: 'Teste Cancelado',
-          customerId: 'teste-web',
-          status: 'cancelado' as OrderStatus,
-          notes: 'Pedido teste - cancelado',
-          cancellationReason: 'Cliente desistiu do pedido',
-          items: [{ name: 'Espeto Frango', price: 14.9, qty: 3 }],
-          total: 44.7,
-        },
-        {
-          customerName: 'Teste Concluido',
-          customerId: 'teste-web',
-          status: 'entregue' as OrderStatus,
-          notes: 'Pedido teste - concluido',
-          items: [{ name: 'Linguica Toscana 1kg', price: 32.9, qty: 2 }],
-          total: 65.8,
-        },
-      ];
-
-      for (const item of testOrders) {
-        await addDoc(collection(db, 'pedidos'), {
-          ...basePayload,
-          ...item,
-          firstItemName: item.items[0]?.name ?? null,
-          itemsCount: item.items.reduce((acc, row) => acc + (Number(row.qty) || 0), 0),
-          isActive: isActiveOrderStatus(item.status),
-          orderCode: generateOrderCode(),
-          statusUpdatedAt: serverTimestamp(),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      Alert.alert('Sucesso', 'Pedidos de teste criados com sucesso.');
-    } catch {
-      Alert.alert('Erro', 'Não foi possível criar os pedidos de teste.');
-    } finally {
-      setManagingTestOrders(false);
-    }
-  };
-
-  const handleClearTestOrders = async () => {
-    const confirmed = await confirmAction(
-      'Limpar pedidos teste',
-      'Deseja remover todos os pedidos de teste?',
-      'Remover'
-    );
-    if (!confirmed) return;
-
-    setManagingTestOrders(true);
-    try {
-      const snap = await getDocs(collection(db, 'pedidos'));
-      const refsToDelete = snap.docs.filter((docSnap) => {
-        const data = docSnap.data();
-        return isTestOrder({
-          customerName: typeof data.customerName === 'string' ? data.customerName : undefined,
-          notes: typeof data.notes === 'string' ? data.notes : undefined,
-          customerEmail: typeof data.customerEmail === 'string' ? data.customerEmail : undefined,
-        });
-      });
-
-      if (!refsToDelete.length) {
-        Alert.alert('Aviso', 'Nenhum pedido de teste encontrado.');
-        return;
-      }
-
-      const batch = writeBatch(db);
-      refsToDelete.forEach((docSnap) => {
-        batch.delete(docSnap.ref);
-      });
-      await batch.commit();
-
-      Alert.alert('Sucesso', `${refsToDelete.length} pedido(s) de teste removido(s).`);
-    } catch {
-      Alert.alert('Erro', 'Não foi possível limpar os pedidos de teste.');
-    } finally {
-      setManagingTestOrders(false);
-    }
-  };
-
   return (
-    <View style={styles.root}>
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
-        <View style={styles.topRow}>
-          <View>
-            <Text style={styles.pageTitle}>Pedidos</Text>
-            <Text style={styles.pageSubtitle}>
-              {filteredOrders.length} pedidos • {delayedTotal} atrasados
-            </Text>
-          </View>
-          <View style={styles.topActionsRow}>
-            <Pressable
-              style={[styles.topActionBtn, styles.topActionPrimary, managingTestOrders && styles.topActionDisabled]}
-              onPress={handleCreateTestOrders}
-              disabled={managingTestOrders}
-            >
-              <Text style={styles.topActionPrimaryText}>Criar pedidos teste</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.topActionBtn, styles.topActionDanger, managingTestOrders && styles.topActionDisabled]}
-              onPress={handleClearTestOrders}
-              disabled={managingTestOrders}
-            >
-              <Text style={styles.topActionDangerText}>Limpar pedidos teste</Text>
-            </Pressable>
-          </View>
-        </View>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <View style={styles.headerRow}>
+        <Text style={styles.title}>Pedidos</Text>
+        <Text style={styles.subtitle}>{filteredOrders.length} pedidos • {delayedTotal} atrasados</Text>
+      </View>
 
-        <View style={styles.toolbarRow}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Buscar por cliente, telefone, endereço, item ou ID..."
-            value={search}
-            onChangeText={setSearch}
-          />
-        </View>
+      <TextInput
+        style={styles.searchInput}
+        placeholder="Buscar por cliente, telefone, endereço, item ou ID..."
+        value={search}
+        onChangeText={setSearch}
+      />
 
-        {loading ? (
-          <View style={styles.centered}><ActivityIndicator color={BRAND} /></View>
-        ) : (
-          <View style={styles.boardGrid}>
-            {BOARD_SECTIONS.map((section) => {
-              const list = ordersByStatus[section.key] ?? [];
-              return (
-                <View key={section.key} style={styles.sectionCard}>
-                  <View style={styles.sectionHeader}>
-                    <Text style={styles.sectionTitle}>{section.title}</Text>
-                    <View style={styles.sectionBadge}>
-                      <Text style={styles.sectionBadgeText}>{list.length}</Text>
-                    </View>
-                  </View>
+      <View style={styles.summaryRow}>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'all' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('all')}
+        >
+          <Text style={styles.summaryLabel}>Todos</Text>
+          <Text style={styles.summaryValue}>{filterCounts.all}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'novo' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('novo')}
+        >
+          <Text style={styles.summaryLabel}>Aguardando</Text>
+          <Text style={styles.summaryValue}>{filterCounts.novo}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'em_preparo' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('em_preparo')}
+        >
+          <Text style={styles.summaryLabel}>Preparo</Text>
+          <Text style={styles.summaryValue}>{filterCounts.em_preparo}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'pronto' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('pronto')}
+        >
+          <Text style={styles.summaryLabel}>Pronto</Text>
+          <Text style={styles.summaryValue}>{filterCounts.pronto}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'em_rota' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('em_rota')}
+        >
+          <Text style={styles.summaryLabel}>Em rota</Text>
+          <Text style={styles.summaryValue}>{filterCounts.em_rota}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, styles.summaryExpiredCard, activeFilter === 'cancelado' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('cancelado')}
+        >
+          <Text style={styles.summaryLabel}>Cancelados</Text>
+          <Text style={styles.summaryValue}>{filterCounts.cancelado}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.summaryCard, activeFilter === 'entregue' && styles.summaryCardActive]}
+          onPress={() => setActiveFilter('entregue')}
+        >
+          <Text style={styles.summaryLabel}>Pedidos concluídos</Text>
+          <Text style={styles.summaryValue}>{filterCounts.entregue}</Text>
+        </Pressable>
+      </View>
 
+      {loading ? (
+        <View style={styles.centered}><ActivityIndicator color={BRAND} /></View>
+      ) : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.boardContent}>
+          {visibleSections.map((section) => {
+            const list = ordersByStatus[section.key] ?? [];
+            return (
+              <View key={section.key} style={styles.sectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>{section.title}</Text>
+                  <View style={styles.sectionBadge}><Text style={styles.sectionBadgeText}>{list.length}</Text></View>
+                </View>
+
+                <ScrollView contentContainerStyle={styles.sectionList}>
                   {list.length === 0 ? (
-                    <View style={styles.sectionEmpty}>
-                      <Text style={styles.emptyText}>Nenhum pedido nesta etapa.</Text>
-                    </View>
+                    <View style={styles.sectionEmpty}><Text style={styles.emptyText}>Sem pedidos nesta etapa.</Text></View>
                   ) : (
                     list.map((order) => {
                       const nextStatus = getNextStatus(order.status);
                       const delayed = isOrderDelayed(order);
                       return (
-                        <Pressable
-                          key={order.id}
-                          style={[styles.orderCard, delayed && styles.orderCardDelayed]}
-                          onPress={() => setSelectedOrder(order)}
-                        >
+                        <Pressable key={order.id} style={[styles.orderCard, delayed && styles.orderCardDelayed]} onPress={() => setSelectedOrder(order)}>
                           <View style={styles.orderCardHeader}>
                             <Text style={styles.orderId}>{getOrderDisplayCode(order)}</Text>
                             <Text style={styles.orderTime}>{getElapsedLabel(order)}</Text>
                           </View>
 
                           <Text style={styles.orderCustomer} numberOfLines={1}>{order.customerName}</Text>
-                          <Text style={styles.orderMeta} numberOfLines={1}>
-                            {order.itemsCount ?? order.items.length} item(s) • R$ {order.total.toFixed(2)}
-                          </Text>
-                          <Text style={styles.orderMeta} numberOfLines={1}>
-                            {order.customerPhone || 'Sem telefone'}
-                          </Text>
+                          <Text style={styles.orderMeta} numberOfLines={1}>{order.itemsCount ?? order.items.length} item(s) • R$ {order.total.toFixed(2)}</Text>
+                          <Text style={styles.orderMeta} numberOfLines={1}>{order.customerPhone || 'Sem telefone'}</Text>
 
                           <View style={styles.orderFooterRow}>
                             <Text style={[styles.statusBadge, { backgroundColor: ORDER_STATUS_COLORS[order.status] }]}>
@@ -514,7 +395,7 @@ export default function PedidosWebScreen() {
                                 disabled={updatingStatus}
                               >
                                 <Text style={styles.advanceBtnText}>
-                                  {order.status === 'novo' ? 'Aceitar pedido' : LOCAL_STATUS_LABELS[nextStatus]}
+                                  {order.status === 'novo' ? 'Aceitar' : LOCAL_STATUS_LABELS[nextStatus]}
                                 </Text>
                               </Pressable>
                             ) : null}
@@ -532,50 +413,37 @@ export default function PedidosWebScreen() {
                       );
                     })
                   )}
-                </View>
-              );
-            })}
-            {filteredOrders.length === 0 ? (
-              <View style={styles.emptyRow}>
-                <Text style={styles.emptyText}>Nenhum pedido encontrado para o filtro.</Text>
+                </ScrollView>
               </View>
-            ) : null}
-          </View>
-        )}
-      </ScrollView>
+            );
+          })}
+        </ScrollView>
+      )}
 
-      <Modal
-        visible={!!selectedOrder}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSelectedOrder(null)}
-      >
+      <Modal visible={!!selectedOrder} transparent animationType="fade" onRequestClose={() => setSelectedOrder(null)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             {selectedOrder ? (
               <>
-                <View style={styles.sidePanelHeader}>
-                  <Text style={styles.sidePanelTitle}>Pedido {getOrderDisplayCode(selectedOrder)}</Text>
-                  <Pressable onPress={() => setSelectedOrder(null)}>
-                    <Text style={styles.closeBtnText}>✕</Text>
-                  </Pressable>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Pedido {getOrderDisplayCode(selectedOrder)}</Text>
+                  <Pressable onPress={() => setSelectedOrder(null)}><Text style={styles.closeText}>✕</Text></Pressable>
                 </View>
 
-                <ScrollView contentContainerStyle={styles.detailContent}>
+                <ScrollView contentContainerStyle={styles.modalBody}>
                   <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>Cliente</Text>
+                    <Text style={styles.detailTitle}>Cliente</Text>
                     <Text style={styles.detailText}>{selectedOrder.customerName || '-'}</Text>
                     <Text style={styles.detailMeta}>Telefone: {selectedOrder.customerPhone || '-'}</Text>
                     <Text style={styles.detailMeta}>Endereço: {selectedOrder.customerAddress || '-'}</Text>
-                    <Text style={styles.detailMeta}>E-mail: {selectedOrder.customerEmail || '-'}</Text>
                   </View>
 
                   <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>Pedido</Text>
-                    {selectedOrder.items.map((item, i) => (
-                      <View key={`${selectedOrder.id}-${i}`} style={styles.itemRow}>
+                    <Text style={styles.detailTitle}>Itens</Text>
+                    {selectedOrder.items.map((item, idx) => (
+                      <View key={`${selectedOrder.id}-${idx}`} style={styles.itemRow}>
                         <Text style={styles.itemName} numberOfLines={1}>{item.qty}x {item.name}</Text>
-                        <Text style={styles.itemPrice}>R$ {(item.price * item.qty).toFixed(2)}</Text>
+                        <Text style={styles.itemPrice}>R$ {(item.qty * item.price).toFixed(2)}</Text>
                       </View>
                     ))}
                     <View style={[styles.itemRow, styles.totalRow]}>
@@ -585,28 +453,17 @@ export default function PedidosWebScreen() {
                   </View>
 
                   <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>Informações</Text>
-                    <Text style={styles.detailMeta}>Forma de pagamento: {getPaymentLabel(selectedOrder)}</Text>
+                    <Text style={styles.detailTitle}>Informações</Text>
                     <Text style={styles.detailMeta}>Status: {LOCAL_STATUS_LABELS[selectedOrder.status]}</Text>
                     <Text style={styles.detailMeta}>Criado em: {formatDateTime(selectedOrder)}</Text>
-                    <Text style={styles.detailMeta}>Origem: {selectedOrder.origem || '-'}</Text>
-                    {selectedOrder.updatedBy ? (
-                      <Text style={styles.detailMeta}>Atualizado por: {selectedOrder.updatedBy}</Text>
-                    ) : null}
+                    <Text style={styles.detailMeta}>Pagamento: {selectedOrder.paymentMethod || '-'}</Text>
                     {selectedOrder.cancellationReason ? (
                       <Text style={styles.detailMeta}>Motivo do cancelamento: {selectedOrder.cancellationReason}</Text>
                     ) : null}
                   </View>
 
-                  {selectedOrder.notes ? (
-                    <View style={styles.detailSection}>
-                      <Text style={styles.detailSectionTitle}>Observações</Text>
-                      <Text style={styles.detailText}>{selectedOrder.notes}</Text>
-                    </View>
-                  ) : null}
-
                   <View style={styles.detailSection}>
-                    <Text style={styles.detailSectionTitle}>Ações</Text>
+                    <Text style={styles.detailTitle}>Ações</Text>
                     <View style={styles.statusFlow}>
                       {ORDER_STATUS_FLOW.map((status) => {
                         const isCurrent = selectedOrder.status === status;
@@ -615,16 +472,14 @@ export default function PedidosWebScreen() {
                           <Pressable
                             key={status}
                             style={[
-                              styles.statusFlowBtn,
+                              styles.statusBtn,
                               isCurrent && { backgroundColor: ORDER_STATUS_COLORS[status], borderColor: ORDER_STATUS_COLORS[status] },
-                              isDisabled && !isCurrent && styles.statusFlowBtnDisabled,
+                              isDisabled && !isCurrent && styles.statusBtnDisabled,
                             ]}
                             onPress={() => handleStatusChange(selectedOrder, status)}
                             disabled={isDisabled}
                           >
-                            <Text style={[styles.statusFlowBtnText, isCurrent && { color: '#fff' }]}>
-                              {LOCAL_STATUS_LABELS[status]}
-                            </Text>
+                            <Text style={[styles.statusBtnText, isCurrent && { color: '#fff' }]}>{LOCAL_STATUS_LABELS[status]}</Text>
                           </Pressable>
                         );
                       })}
@@ -642,103 +497,101 @@ export default function PedidosWebScreen() {
         </View>
       </Modal>
 
-      <Modal
-        visible={!!cancelModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setCancelModal(null)}
-      >
+      <Modal visible={!!cancelModal} transparent animationType="fade" onRequestClose={() => setCancelModal(null)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.cancelCard}>
             <Text style={styles.cancelTitle}>Cancelar pedido</Text>
-            <Text style={styles.cancelSubTitle}>
-              Informe o motivo do cancelamento para o pedido
-              {cancelModal ? ` ${getOrderDisplayCode(cancelModal.order)}` : ''}.
-            </Text>
+            <Text style={styles.cancelSubtitle}>Informe o motivo para continuar.</Text>
             <TextInput
-              style={styles.cancelReasonInput}
+              style={styles.cancelInput}
               value={cancelModal?.reason ?? ''}
               onChangeText={(text) => setCancelModal((prev) => (prev ? { ...prev, reason: text } : prev))}
               placeholder="Motivo do cancelamento"
               multiline
             />
             <View style={styles.cancelActions}>
-              <Pressable style={styles.cancelModalGhostBtn} onPress={() => setCancelModal(null)}>
-                <Text style={styles.cancelModalGhostText}>Voltar</Text>
+              <Pressable style={styles.cancelGhostBtn} onPress={() => setCancelModal(null)}>
+                <Text style={styles.cancelGhostText}>Voltar</Text>
               </Pressable>
-              <Pressable style={styles.cancelModalPrimaryBtn} onPress={handleCancelWithReason}>
-                <Text style={styles.cancelModalPrimaryText}>Confirmar cancelamento</Text>
+              <Pressable style={styles.cancelPrimaryBtn} onPress={handleCancelWithReason}>
+                <Text style={styles.cancelPrimaryText}>Confirmar</Text>
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  content: { padding: 32, paddingBottom: 60, gap: 16 },
-  centered: { padding: 32, alignItems: 'center' },
-  topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  pageTitle: { fontSize: 26, fontWeight: '800', color: '#2c1b12' },
-  pageSubtitle: { fontSize: 13, color: '#6e5a4b' },
-  topActionsRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' },
-  topActionBtn: {
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  topActionPrimary: {
-    backgroundColor: '#2c1b12',
-    borderColor: '#2c1b12',
-  },
-  topActionDanger: {
-    backgroundColor: '#fff',
-    borderColor: '#e1bcbc',
-  },
-  topActionPrimaryText: { color: '#fff', fontSize: 12, fontWeight: '800' },
-  topActionDangerText: { color: '#9f2d2d', fontSize: 12, fontWeight: '800' },
-  topActionDisabled: { opacity: 0.6 },
-  toolbarRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  safe: { flex: 1, backgroundColor: '#faf6f0', padding: 12, gap: 10 },
+  headerRow: { gap: 2 },
+  title: { fontSize: 24, fontWeight: '800', color: '#2c1b12' },
+  subtitle: { fontSize: 13, color: '#6e5a4b' },
   searchInput: {
-    flex: 1,
     borderWidth: 1,
     borderColor: '#d9cfc2',
     borderRadius: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 10,
     backgroundColor: '#fff',
     fontSize: 14,
   },
-
-  boardGrid: {
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  summaryRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 14,
-    alignItems: 'flex-start',
+    gap: 8,
   },
-  sectionCard: {
-    flexBasis: 360,
+  summaryCard: {
+    minWidth: '30%',
     flexGrow: 1,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#eadfd2',
+  },
+  summaryCardActive: {
+    borderWidth: 2,
+    borderColor: '#2c1b12',
+  },
+  summaryWarningCard: {
+    backgroundColor: '#fff7d6',
+    borderColor: '#e5c24d',
+  },
+  summaryExpiredCard: {
+    backgroundColor: '#fde2e2',
+    borderColor: '#e48d8d',
+  },
+  summaryLabel: {
+    color: '#6e5a4b',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  summaryValue: {
+    color: '#2c1b12',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+
+  boardContent: { gap: 12, paddingBottom: 24 },
+  sectionCard: {
+    width: 320,
+    maxWidth: 320,
     backgroundColor: '#fff',
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#e8ddd4',
-    padding: 12,
-    gap: 10,
+    padding: 10,
+    gap: 8,
+    maxHeight: '92%',
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 4,
-  },
-  sectionTitle: { fontSize: 14, fontWeight: '800', color: '#2c1b12' },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  sectionTitle: { fontSize: 13, fontWeight: '800', color: '#2c1b12' },
   sectionBadge: {
     minWidth: 24,
     borderRadius: 999,
@@ -748,14 +601,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   sectionBadgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  sectionList: { gap: 8, paddingBottom: 8 },
   sectionEmpty: {
-    minHeight: 80,
+    minHeight: 72,
     borderRadius: 10,
     backgroundColor: '#f8f4f0',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 12,
   },
+  emptyText: { color: '#6e5a4b' },
 
   orderCard: {
     borderWidth: 1,
@@ -776,14 +631,9 @@ const styles = StyleSheet.create({
   },
   orderId: { fontSize: 12, color: '#8f7766', fontWeight: '700' },
   orderTime: { fontSize: 12, color: '#8f7766' },
-  orderCustomer: { fontSize: 16, color: '#2c1b12', fontWeight: '800' },
+  orderCustomer: { fontSize: 15, color: '#2c1b12', fontWeight: '800' },
   orderMeta: { fontSize: 12, color: '#5f4b3c' },
-  orderFooterRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 2,
-  },
+  orderFooterRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   statusBadge: {
     alignSelf: 'flex-start',
     paddingHorizontal: 10,
@@ -794,11 +644,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     overflow: 'hidden',
   },
-  delayBadge: {
-    fontSize: 11,
-    color: '#9f2d2d',
-    fontWeight: '800',
-  },
+  delayBadge: { fontSize: 11, color: '#9f2d2d', fontWeight: '800' },
   orderActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   advanceBtn: {
     flex: 1,
@@ -819,61 +665,88 @@ const styles = StyleSheet.create({
   },
   cancelInlineBtnText: { color: '#9f2d2d', fontWeight: '700', fontSize: 12 },
 
-  emptyRow: { padding: 24, alignItems: 'center' },
-  emptyText: { color: '#6e5a4b' },
-
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(28, 20, 14, 0.48)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 16,
   },
   modalCard: {
-    width: '92%',
-    maxWidth: 760,
-    maxHeight: '92%',
+    width: '100%',
+    maxHeight: '94%',
     backgroundColor: '#fff',
     borderRadius: 14,
     borderWidth: 1,
     borderColor: '#e8ddd4',
     overflow: 'hidden',
   },
-  sidePanelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#e8ddd4' },
-  sidePanelTitle: { fontSize: 17, fontWeight: '800', color: '#2c1b12' },
-  closeBtnText: { fontSize: 18, color: '#6e5a4b', fontWeight: '700' },
-  detailContent: { padding: 20, gap: 8, paddingBottom: 40 },
-  detailSection: { gap: 6, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: '#f0e8e0' },
-  detailSectionTitle: { fontSize: 12, fontWeight: '800', color: '#a08060', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
-  detailText: { fontSize: 15, color: '#2c1b12', fontWeight: '600' },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e8ddd4',
+  },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: '#2c1b12' },
+  closeText: { fontSize: 18, color: '#6e5a4b', fontWeight: '700' },
+  modalBody: { padding: 16, gap: 10, paddingBottom: 28 },
+  detailSection: {
+    gap: 6,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0e8e0',
+  },
+  detailTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#a08060',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  detailText: { fontSize: 14, color: '#2c1b12', fontWeight: '600' },
   detailMeta: { fontSize: 13, color: '#6e5a4b' },
-  itemRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  itemRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 3 },
   itemName: { flex: 1, fontSize: 14, color: '#2c1b12' },
   itemPrice: { fontSize: 14, color: '#2c1b12', fontWeight: '600' },
   totalRow: { borderTopWidth: 1, borderTopColor: '#f0e8e0', marginTop: 4, paddingTop: 8 },
-  totalLabel: { fontSize: 15, fontWeight: '800', color: '#2c1b12' },
-  totalValue: { fontSize: 16, fontWeight: '800', color: BRAND },
+  totalLabel: { fontSize: 14, fontWeight: '800', color: '#2c1b12' },
+  totalValue: { fontSize: 15, fontWeight: '800', color: BRAND },
   statusFlow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
-  statusFlowBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#d9cfc2', backgroundColor: '#fff' },
-  statusFlowBtnDisabled: { opacity: 0.45 },
-  statusFlowBtnText: { fontSize: 12, fontWeight: '700', color: '#6e5a4b' },
-  cancelOrderBtn: { borderWidth: 1, borderColor: BRAND, borderRadius: 8, paddingVertical: 8, alignItems: 'center', marginTop: 4 },
+  statusBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d9cfc2',
+    backgroundColor: '#fff',
+  },
+  statusBtnDisabled: { opacity: 0.45 },
+  statusBtnText: { fontSize: 12, fontWeight: '700', color: '#6e5a4b' },
+  cancelOrderBtn: {
+    borderWidth: 1,
+    borderColor: BRAND,
+    borderRadius: 8,
+    paddingVertical: 8,
+    alignItems: 'center',
+    marginTop: 4,
+  },
   cancelOrderBtnText: { color: BRAND, fontWeight: '700', fontSize: 13 },
 
   cancelCard: {
-    width: '92%',
-    maxWidth: 560,
+    width: '100%',
     backgroundColor: '#fff',
     borderRadius: 14,
     borderWidth: 1,
     borderColor: '#e8ddd4',
-    padding: 20,
-    gap: 12,
+    padding: 16,
+    gap: 10,
   },
-  cancelTitle: { fontSize: 20, fontWeight: '800', color: '#2c1b12' },
-  cancelSubTitle: { fontSize: 13, color: '#6e5a4b' },
-  cancelReasonInput: {
+  cancelTitle: { fontSize: 18, fontWeight: '800', color: '#2c1b12' },
+  cancelSubtitle: { fontSize: 13, color: '#6e5a4b' },
+  cancelInput: {
     borderWidth: 1,
     borderColor: '#d9cfc2',
     borderRadius: 10,
@@ -881,23 +754,23 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 14,
     backgroundColor: '#fdfaf6',
-    minHeight: 92,
+    minHeight: 90,
     textAlignVertical: 'top',
   },
-  cancelActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 2 },
-  cancelModalGhostBtn: {
+  cancelActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
+  cancelGhostBtn: {
     borderWidth: 1,
     borderColor: '#d9cfc2',
     borderRadius: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  cancelModalGhostText: { color: '#6e5a4b', fontWeight: '700', fontSize: 13 },
-  cancelModalPrimaryBtn: {
+  cancelGhostText: { color: '#6e5a4b', fontWeight: '700', fontSize: 13 },
+  cancelPrimaryBtn: {
     backgroundColor: BRAND,
     borderRadius: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  cancelModalPrimaryText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  cancelPrimaryText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 });

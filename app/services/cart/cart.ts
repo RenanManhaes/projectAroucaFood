@@ -1,7 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db } from "@/config/firebase";
+import { isAdminEmail } from "@/constants/auth/adminEmails";
 import type { Product } from "@/types/Product";
-import { deleteDoc, doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, serverTimestamp, setDoc, Timestamp } from "firebase/firestore";
 
 export type CartItem = {
   productId: string;
@@ -15,6 +16,15 @@ export type CartItem = {
 
 const CART_KEY = "@aroucafood/cart/v1";
 const REMOTE_CART_COLLECTION = "carts";
+const GUEST_CART_TTL_MS = 12 * 60 * 60 * 1000;
+const USER_CART_TTL_MS = 2 * 24 * 60 * 60 * 1000;
+
+type LocalCartPayload = {
+  items: unknown;
+  expiresAt?: number;
+  scope?: "guest" | "user";
+  ownerId?: string | null;
+};
 
 const sanitizeStock = (stock: unknown) => {
   if (typeof stock !== "number" || Number.isNaN(stock)) return null;
@@ -56,11 +66,45 @@ const sortItems = (items: CartItem[]) =>
 const areCartsEqual = (left: CartItem[], right: CartItem[]) =>
   JSON.stringify(sortItems(left)) === JSON.stringify(sortItems(right));
 
+const parseTimestampMs = (value: unknown) => {
+  if (!value) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof (value as { toMillis?: unknown }).toMillis === "function") {
+    try {
+      return (value as { toMillis: () => number }).toMillis();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const resolveLocalCartTtl = () => (auth.currentUser ? USER_CART_TTL_MS : GUEST_CART_TTL_MS);
+
+const isLocalPayload = (value: unknown): value is LocalCartPayload => {
+  return !!value && typeof value === "object" && Array.isArray((value as LocalCartPayload).items);
+};
+
+const isCurrentUserAdmin = () => isAdminEmail(auth.currentUser?.email);
+
+async function clearAdminCartIfNeeded(): Promise<void> {
+  if (!auth.currentUser?.uid || !isCurrentUserAdmin()) return;
+  await saveCart([]);
+  await saveRemoteCart(auth.currentUser.uid, []);
+}
+
 async function loadRemoteCart(userId: string): Promise<CartItem[]> {
   try {
     const snapshot = await getDoc(doc(db, REMOTE_CART_COLLECTION, userId));
     if (!snapshot.exists()) return [];
-    return normalizeItems(snapshot.data()?.items);
+    const data = snapshot.data();
+    const expiresAtMs = parseTimestampMs(data?.expiresAt);
+    if (typeof expiresAtMs === "number" && Date.now() > expiresAtMs) {
+      await deleteDoc(doc(db, REMOTE_CART_COLLECTION, userId));
+      return [];
+    }
+    return normalizeItems(data?.items);
   } catch (err) {
     console.warn("Falha ao carregar carrinho remoto", err);
     return [];
@@ -78,6 +122,7 @@ async function saveRemoteCart(userId: string, items: CartItem[]): Promise<void> 
       doc(db, REMOTE_CART_COLLECTION, userId),
       {
         items,
+        expiresAt: Timestamp.fromMillis(Date.now() + USER_CART_TTL_MS),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -123,7 +168,21 @@ async function loadCart(): Promise<CartItem[]> {
     const raw = await AsyncStorage.getItem(CART_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return normalizeItems(parsed);
+
+    if (Array.isArray(parsed)) {
+      return normalizeItems(parsed);
+    }
+
+    if (isLocalPayload(parsed)) {
+      const expiresAtMs = Number(parsed.expiresAt) || 0;
+      if (expiresAtMs > 0 && Date.now() > expiresAtMs) {
+        await AsyncStorage.removeItem(CART_KEY);
+        return [];
+      }
+      return normalizeItems(parsed.items);
+    }
+
+    return [];
   } catch (err) {
     console.warn("Falha ao carregar carrinho", err);
     return [];
@@ -132,13 +191,24 @@ async function loadCart(): Promise<CartItem[]> {
 
 async function saveCart(items: CartItem[]): Promise<void> {
   try {
-    await AsyncStorage.setItem(CART_KEY, JSON.stringify(items));
+    const payload: LocalCartPayload = {
+      items,
+      expiresAt: Date.now() + resolveLocalCartTtl(),
+      scope: auth.currentUser ? "user" : "guest",
+      ownerId: auth.currentUser?.uid ?? null,
+    };
+    await AsyncStorage.setItem(CART_KEY, JSON.stringify(payload));
   } catch (err) {
     console.warn("Falha ao salvar carrinho", err);
   }
 }
 
 export async function addOrIncrementItem(product: Product, quantity = 1): Promise<CartItem[]> {
+  if (isCurrentUserAdmin()) {
+    await clearAdminCartIfNeeded();
+    return [];
+  }
+
   const cart = await loadCart();
   const idx = cart.findIndex((i) => i.productId === product.id);
   const productStock = sanitizeStock(product.stock);
@@ -169,6 +239,11 @@ export async function addOrIncrementItem(product: Product, quantity = 1): Promis
 }
 
 export async function setQuantity(productId: string, qty: number): Promise<CartItem[]> {
+  if (isCurrentUserAdmin()) {
+    await clearAdminCartIfNeeded();
+    return [];
+  }
+
   const cart = await loadCart();
   const next = cart
     .map((item) =>
@@ -182,6 +257,11 @@ export async function setQuantity(productId: string, qty: number): Promise<CartI
 }
 
 export async function removeItem(productId: string): Promise<CartItem[]> {
+  if (isCurrentUserAdmin()) {
+    await clearAdminCartIfNeeded();
+    return [];
+  }
+
   const cart = (await loadCart()).filter((item) => item.productId !== productId);
   await persistCart(cart);
   return cart;
@@ -196,6 +276,11 @@ export async function clearLocalCartCache(): Promise<void> {
 }
 
 export async function getCart(): Promise<CartItem[]> {
+  if (isCurrentUserAdmin()) {
+    await clearAdminCartIfNeeded();
+    return [];
+  }
+
   if (!auth.currentUser) {
     return loadCart();
   }
@@ -204,6 +289,11 @@ export async function getCart(): Promise<CartItem[]> {
 }
 
 export async function syncCartWithCurrentUser(): Promise<CartItem[]> {
+  if (isCurrentUserAdmin()) {
+    await clearAdminCartIfNeeded();
+    return [];
+  }
+
   return syncAuthenticatedCart();
 }
 
@@ -215,12 +305,14 @@ export function mergeCarts(localItems: CartItem[], remoteItems: CartItem[]): Car
     const existing = mergedMap.get(item.productId);
     if (existing) {
       const mergedStock = sanitizeStock(existing.stock ?? item.stock);
+      // Local e remoto costumam representar o mesmo estado sincronizado.
+      // Usar soma aqui gera efeito 2x/4x ao abrir o carrinho repetidas vezes.
       mergedMap.set(item.productId, {
         ...existing,
         category: existing.category ?? item.category ?? null,
         image: existing.image ?? item.image ?? null,
         stock: mergedStock,
-        qty: clampQtyByStock(existing.qty + item.qty, mergedStock),
+        qty: clampQtyByStock(Math.max(existing.qty, item.qty), mergedStock),
       });
     } else {
       mergedMap.set(item.productId, {

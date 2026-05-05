@@ -53,14 +53,28 @@ export default function AdminLayout() {
         name="estoque"
         options={{
           title: 'Estoque',
-          tabBarIcon: ({ color }) => <IconSymbol size={26} name="tray.full" color={color} />,
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="list.bullet" color={color} />,
         }}
       />
       <Tabs.Screen
         name="produtos"
         options={{
           title: 'Produtos',
-          tabBarIcon: ({ color }) => <IconSymbol size={26} name="list.bullet" color={color} />,
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="tray.full" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="categorias"
+        options={{
+          title: 'Categorias',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="square.grid.2x2" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="pedidos"
+        options={{
+          title: 'Pedidos',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="list.bullet.rectangle.portrait" color={color} />,
         }}
       />
       <Tabs.Screen

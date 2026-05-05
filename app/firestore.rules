@@ -15,6 +15,12 @@ service cloud.firestore {
       ];
     }
 
+    function hasValidOrderOwner() {
+      return isSignedIn() &&
+        request.resource.data.customerId is string &&
+        request.resource.data.customerId == request.auth.uid;
+    }
+
     // Users can manage own profile; admins can read/update/delete any profile
     match /users/{userId} {
       allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
@@ -37,13 +43,46 @@ service cloud.firestore {
 
     // Carrinho sincronizado por usuário
     match /carts/{userId} {
-      allow read, write: if isSignedIn() && request.auth.uid == userId;
+      allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
     }
 
-    // Pedidos: criação por usuário autenticado, leitura/edição só para admin
+    // Lock de pedido ativo por usuário (um pedido ativo por vez)
+    match /activeOrders/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAdmin() || (
+        isSignedIn() &&
+        request.auth.uid == userId &&
+        !exists(/databases/$(database)/documents/activeOrders/$(userId)) &&
+        request.resource.data.customerId is string &&
+        request.resource.data.customerId == userId &&
+        request.resource.data.activeOrderId is string
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // Pedidos: criação com dono obrigatório, leitura por admin ou dono, edição só admin
     match /pedidos/{pedidoId} {
-      allow create: if isSignedIn();
-      allow read, update, delete: if isAdmin();
+      allow create: if isAdmin() || (
+        hasValidOrderOwner() &&
+        request.resource.data.status == 'novo' &&
+        request.resource.data.isActive == true &&
+        existsAfter(/databases/$(database)/documents/activeOrders/$(request.auth.uid)) &&
+        getAfter(/databases/$(database)/documents/activeOrders/$(request.auth.uid)).data.activeOrderId == request.resource.id &&
+        getAfter(/databases/$(database)/documents/activeOrders/$(request.auth.uid)).data.customerId == request.auth.uid
+      );
+      allow read: if isAdmin() || (
+        isSignedIn() && (
+          (
+            resource.data.customerId is string &&
+            resource.data.customerId == request.auth.uid
+          ) ||
+          (
+            resource.data.customerEmail is string &&
+            resource.data.customerEmail == request.auth.token.email
+          )
+        )
+      );
+      allow update, delete: if isAdmin();
     }
 
     // Fallback: deny anything else

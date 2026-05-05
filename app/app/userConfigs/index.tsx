@@ -4,11 +4,13 @@ import {
   Alert,
   FlatList,
   Image,
+  Modal,
   Pressable,
   Text,
   TextInput,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ProductModal } from "@/components/ProductModal";
@@ -49,7 +51,7 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cartCount, setCartCount] = useState(0);
-  const [cartMessage, setCartMessage] = useState<string | null>(null);
+  const [cartSuccessMessage, setCartSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (selectedCategory && !categories.some((c) => normalize(c.id) === normalize(selectedCategory))) {
@@ -230,12 +232,11 @@ export default function HomeScreen() {
       const adjustedByStock = quantityToAdd < quantity;
 
       setCartCount(total);
-      setCartMessage(
+      setCartSuccessMessage(
         adjustedByStock
           ? `Adicionamos ${quantityToAdd} unidade(s) de ${product.name} conforme o estoque disponível.`
-          : `${product.name} adicionado ao carrinho`
+          : `${product.name} adicionado ao carrinho com sucesso.`
       );
-      setTimeout(() => setCartMessage(null), 2200);
       setModalVisible(false);
         } catch {
       Alert.alert("Erro", "Não foi possível adicionar ao carrinho. Tente novamente.");
@@ -359,7 +360,6 @@ export default function HomeScreen() {
                 ) : null}
               </View>
 
-              {cartMessage ? <Text style={styles.cartMessage}>{cartMessage}</Text> : null}
             </View>
 
             <Text style={styles.sectionTitle}>Categorias</Text>
@@ -436,6 +436,26 @@ export default function HomeScreen() {
         onClose={() => setModalVisible(false)}
         onAdd={(product, qty) => handleAddToCart(product, qty)}
       />
+
+      <Modal
+        visible={!!cartSuccessMessage}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCartSuccessMessage(null)}
+      >
+        <View style={styles.feedbackBackdrop}>
+          <View style={styles.feedbackCard}>
+            <View style={styles.feedbackIconWrap}>
+              <Ionicons name="checkmark" size={26} color="#fff" />
+            </View>
+            <Text style={styles.feedbackTitle}>Item adicionado</Text>
+            <Text style={styles.feedbackText}>{cartSuccessMessage || "Produto adicionado com sucesso."}</Text>
+            <Pressable style={styles.feedbackButton} onPress={() => setCartSuccessMessage(null)}>
+              <Text style={styles.feedbackButtonText}>Fechar</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

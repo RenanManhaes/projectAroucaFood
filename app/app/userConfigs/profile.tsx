@@ -12,7 +12,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "@/config/firebase";
 import { isAdminEmail } from "@/constants/auth/adminEmails";
@@ -22,6 +22,7 @@ import { clearLocalCartCache, syncCartWithCurrentUser } from "@/services/cart/ca
 
 export default function ProfileScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ mode?: string; fromCheckout?: string }>();
   const [user, setUser] = useState(auth.currentUser);
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [fullName, setFullName] = useState("");
@@ -118,6 +119,19 @@ export default function ProfileScreen() {
     fetchProfile();
   }, [user, isAdmin]);
 
+  useEffect(() => {
+    if (params.mode === "signup") {
+      setMode("signup");
+      setMessage(null);
+      return;
+    }
+
+    if (params.mode === "login") {
+      setMode("login");
+      setMessage(null);
+    }
+  }, [params.mode]);
+
   const toggleMode = () => {
     setMode((prev) => (prev === "login" ? "signup" : "login"));
     setMessage(null);
@@ -200,6 +214,8 @@ export default function ProfileScreen() {
       const isAdmin = isAdminEmail(email);
       if (isAdmin) {
         router.replace("/adminConfigs/estoque");
+      } else if (params.fromCheckout === "1") {
+        router.replace("/userConfigs/cart");
       }
       resetFormFields();
     } catch (err: unknown) {
